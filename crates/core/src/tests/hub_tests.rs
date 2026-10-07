@@ -83,3 +83,13 @@ fn honors_hf_endpoint_and_token_env() {
 	assert!(request.starts_with("GET /api/models/acme/missing-model"), "request did not reach HF_ENDPOINT: {request:?}");
 	assert!(request.to_ascii_lowercase().contains("authorization: bearer hf_test_token"), "HF_TOKEN not sent: {request:?}");
 }
+
+#[test]
+fn int8_prefers_the_fp32_graph_it_can_quantize() {
+	let cfg = crate::config::ModelConfig { dtype: crate::config::Dtype::Int8, ..crate::config::ModelConfig::default_for_test(None) };
+	let both = s(&["onnx/model.onnx", "onnx/model_int8.onnx"]);
+	assert_eq!(select_remote(&both, None, &candidates_for(&cfg, MODEL_CANDIDATES)).unwrap(), "onnx/model.onnx");
+	// No fp32 graph: the publisher's int8 file.
+	let only_int8 = s(&["onnx/model_int8.onnx", "onnx/model_q4.onnx"]);
+	assert_eq!(select_remote(&only_int8, None, &candidates_for(&cfg, MODEL_CANDIDATES)).unwrap(), "onnx/model_int8.onnx");
+}

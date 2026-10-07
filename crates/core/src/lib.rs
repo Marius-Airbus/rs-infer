@@ -13,6 +13,7 @@ pub mod memory;
 pub mod model;
 pub mod pipeline;
 pub mod pool;
+pub mod quantize;
 pub mod registry;
 pub mod tokenize;
 

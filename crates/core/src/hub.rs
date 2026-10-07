@@ -26,7 +26,9 @@ const MODEL_CANDIDATES: &[&str] = &[
 ];
 const FP32_CANDIDATES: &[&str] = &["model.onnx"];
 const FP16_CANDIDATES: &[&str] = &["model_fp16.onnx", "model.onnx"];
-const INT8_CANDIDATES: &[&str] = &["model_int8.onnx", "model_int8_static.onnx", "model_quantized.onnx", "model.onnx"];
+// int8: the fp32 graph first (the server quantizes it per-channel itself, see
+// `quantize`), the publisher's int8 files when there is no fp32 graph.
+const INT8_CANDIDATES: &[&str] = &["model.onnx", "model_int8.onnx", "model_int8_static.onnx", "model_quantized.onnx"];
 const POOLING_CANDIDATES: &[&str] = &["1_Pooling/config.json"];
 
 pub fn resolve(cfg: &ModelConfig, cache_dir: Option<&Path>) -> Result<Resolved> {
@@ -148,6 +150,20 @@ fn resolve_local(cfg: &ModelConfig, dir: &Path) -> Result<Resolved> {
 	let config_json = pick_file(dir, &["config.json"], sub);
 	let pooling_config = pick_file(dir, POOLING_CANDIDATES, sub);
 	Ok(Resolved { model, tokenizer, config_json, pooling_config, source: format!("path:{}", dir.display()) })
+}
+
+/// Where the server keeps files it derives from models (e.g. int8 graphs):
+/// `<hf_cache_dir>/rsinfer`, else `$HF_HOME/rsinfer`, else
+/// `~/.cache/huggingface/rsinfer`.
+pub fn cache_root(cfg_hf_cache: Option<&Path>) -> PathBuf {
+	if let Some(dir) = cfg_hf_cache {
+		return dir.join("rsinfer");
+	}
+	if let Some(home) = std::env::var_os("HF_HOME") {
+		return PathBuf::from(home).join("rsinfer");
+	}
+	let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+	home.join(".cache").join("huggingface").join("rsinfer")
 }
 
 fn hub_api(cfg_hf_cache: Option<&Path>) -> Result<Api> {

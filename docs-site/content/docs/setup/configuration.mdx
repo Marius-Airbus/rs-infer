@@ -83,6 +83,7 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 | `subfolder` | string | *(unset)* | Subdirectory inside the repo/`path` to look for files, e.g. `onnx`. |
 | `file` | string | *(unset)* | Pin an exact graph filename (e.g. `onnx/model_quantized.onnx`); overrides the automatic `model.onnx` > `fp16` > `quantized` preference. |
 | `tokenizer_hf` | string | `hf` | Repo to take `tokenizer.json`/`config.json` from, for model-only ONNX exports. |
+| `dtype` | string | `auto` | Graph precision. `auto`: on CPU-only execution, int8 (see [INT8 by default](#int8-by-default)); with GPU/CoreML providers, the published graph (fp32 first, else fp16 > quantized). `int8`: the server's int8 rewrite whatever the providers. `fp32` / `fp16`: the published graph of that format, no quantization. |
 | `max_len` | int | *(unset)* | Tokenizer truncation length. Longer inputs are truncated and a `WARN` log line reports how many — except for `pii` models, which scan long texts in windows of `max_len` tokens overlapping by a quarter, so no PII escapes detection. |
 | `replicas` | int | `2` | Number of concurrent ORT sessions (pool replicas) — a memory vs throughput dial. |
 | `max_batch` | int | `32` | Max rows per forward pass when `batching.enabled` is `false` (or a request is larger than `batching.queue_rows`): bigger requests run as successive slices, bounding activation memory. |
@@ -122,6 +123,38 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `threshold` | float | `0.5` | Minimum token probability; below it the token is treated as outside any entity. |
+
+### INT8 by default
+
+On CPU-only execution (`dtype: auto`, the default) the server runs an **int8
+version of the model it quantizes itself** from the fp32 graph, the first time
+the model loads:
+
+- `MatMul` weights become int8 with one scale per output column (activations
+  are quantized dynamically, like `onnxruntime.quantization.quantize_dynamic`),
+  and large embedding tables become int8 with one scale per row. Same speed as
+  the per-tensor int8 files published on the Hub, closer to fp32 (e5-small:
+  embedding cosine to fp32 ≥ 0.995 vs ≥ 0.984), and much less memory because
+  the embedding table stays int8 (e5-small, 4 replicas: 384 MB vs 879 MB idle).
+  e5-small vs fp32 on a 14-core i7, 4 replicas: 1018 vs 582 req/s on 1-text
+  requests, 170 vs 130 texts/s on 32-passage requests.
+- A **quality check** then runs built-in sample inputs through both graphs and
+  keeps int8 only if it stays close to fp32: embedding/logit cosine ≥ 0.99,
+  rerank score within 0.05, PII token labels agreeing ≥ 97% (worst row). The
+  verdict is logged (`int8 quality check passed` / `... drifts too far`) and the
+  model otherwise runs in fp32 — **size memory for fp32 if the check may fail**.
+- The int8 graph and the verdict are cached under `<hf cache>/rsinfer/int8/`
+  (`server.hf_cache_dir`, else `HF_HOME`, else `~/.cache/huggingface`), so later
+  starts skip both steps. Delete that folder to redo them.
+
+Models measured on CPU: e5-small and ms-marco pass; the ai4privacy DistilBERT
+PII model and Qwen3-Embedding-0.6B fail and stay in fp32. Decoder-style models
+have activation outliers that dynamic int8 cannot represent — the Hub's own
+`model_int8.onnx` for Qwen3-Embedding-0.6B only reaches cosine 0.77–0.84 to fp32.
+
+> **Upgrading:** int8 embeddings differ slightly from fp32 ones. If an existing
+> vector index was built with fp32 embeddings, either rebuild it or set
+> `dtype: fp32` on the model.
 
 ### Sizing memory and throughput
 

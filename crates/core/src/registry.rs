@@ -1,13 +1,20 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::HashMap,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
+
+use ort::session::Session;
 
 use crate::{
 	batcher::Batcher,
-	config::{Config, Kind, ModelConfig, Pooling, Scoring},
+	config::{Config, Dtype, Kind, ModelConfig, Pooling, Scoring},
 	ep::{new_session, resolve_eps},
 	hub,
 	model::{find_label, id2label_from_config, pick_output, pooling_from_st_config, Meta},
 	pipeline::{self, Extract},
 	pool::SessionPool,
+	quantize,
 	tokenize::Encoder,
 	Error, LoadedModel, Result,
 };
@@ -140,23 +147,63 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 	let encoder = Encoder::new(&resolved.tokenizer, cfg.max_len, stride)?;
 
 	let (eps, _) = resolve_eps(cfg);
+	let (graph, precision) = choose_graph(cfg, &resolved, &encoder, &eps, hf_cache);
 	let t_sessions = std::time::Instant::now();
 	let mut sessions = Vec::with_capacity(cfg.replicas);
 	for _ in 0..cfg.replicas {
-		sessions.push(new_session(&resolved.model, cfg)?);
+		sessions.push(new_session(&graph, cfg)?);
 	}
 	let session_ms = t_sessions.elapsed().as_millis();
 	let first = sessions.first().expect("replicas >= 1, validated");
 	let input_names = first.inputs().iter().map(|i| i.name().to_string()).collect();
 	let output_names = first.outputs().iter().map(|o| o.name().to_string()).collect();
+	let meta = build_meta(cfg, &resolved, &encoder, first)?;
 
-	let meta = match cfg.kind {
+	let rss_after = crate::memory::rss_mb().unwrap_or(0);
+	let rss_used = rss_after.saturating_sub(rss_before);
+	tracing::info!(
+		model = cfg.name.as_str(),
+		kind = cfg.kind.as_str(),
+		source = %resolved.source,
+		model_mb,
+		replicas = sessions.len(),
+		eps = %eps.join(","),
+		max_len = %cfg.max_len.map(|v| v.to_string()).unwrap_or_else(|| "unset".into()),
+		batching = cfg.batching.enabled,
+		precision,
+		session_build_ms = session_ms,
+		elapsed_ms = t_start.elapsed().as_millis(),
+		ram_used_mb = rss_used,
+		ram_total_mb = rss_after,
+		"model loaded"
+	);
+	let pool = Arc::new(SessionPool::new(sessions, max_queue));
+	let extract = build_extract(&meta);
+	let batcher = cfg.batching.enabled.then(|| Batcher::new(pool.clone(), extract.clone(), cfg.batching));
+	Ok(Arc::new(LoadedModel {
+		cfg: cfg.clone(),
+		encoder,
+		pool,
+		extract,
+		batcher,
+		meta,
+		source: resolved.source,
+		eps,
+		max_len: cfg.max_len,
+		input_names,
+		output_names,
+	}))
+}
+
+/// Kind-specific metadata, read from the config files and a built session.
+fn build_meta(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, session: &Session) -> Result<Meta> {
+	Ok(match cfg.kind {
 		Kind::Embedding => Meta::Embedding {
 			pooling: match cfg.pooling {
-				Pooling::Auto => pooling_from_st_config(&resolved).unwrap_or(Pooling::Mean),
+				Pooling::Auto => pooling_from_st_config(resolved).unwrap_or(Pooling::Mean),
 				p => p,
 			},
-			output: pick_output(first, &["sentence_embedding", "_pooler_output", "pooler_output", "last_hidden_state", "token_embeddings", "output0"])
+			output: pick_output(session, &["sentence_embedding", "_pooler_output", "pooler_output", "last_hidden_state", "token_embeddings", "output0"])
 				.ok_or_else(|| Error::Config(format!("model '{}': no outputs", cfg.name)))?,
 			normalize: cfg.normalize,
 			dimensions: cfg.dimensions,
@@ -174,12 +221,12 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 				scoring: cfg.scoring,
 				yes_id,
 				no_id,
-				output: pick_output(first, &["logits", "output0", "output", "scores"])
+				output: pick_output(session, &["logits", "output0", "output", "scores"])
 					.ok_or_else(|| Error::Config(format!("model '{}': no outputs", cfg.name)))?,
 			}
 		}
 		Kind::Zeroshot => {
-			let id2label = id2label_from_config(&resolved)
+			let id2label = id2label_from_config(resolved)
 				.ok_or_else(|| Error::Config(format!("model '{}': config.json must contain id2label", cfg.name)))?;
 			let entailment = find_label(&id2label, &cfg.entailment_label)
 				.ok_or_else(|| Error::Config(format!("model '{}': no entailment label found in {:?}", cfg.name, id2label)))?;
@@ -189,57 +236,86 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 				entailment,
 				contradiction,
 				template: cfg.hypothesis_template.clone(),
-				output: pick_output(first, &["logits", "output0", "output"])
+				output: pick_output(session, &["logits", "output0", "output"])
 					.ok_or_else(|| Error::Config(format!("model '{}': no outputs", cfg.name)))?,
 			}
 		}
 		Kind::Pii => {
-			let id2label = id2label_from_config(&resolved)
+			let id2label = id2label_from_config(resolved)
 				.ok_or_else(|| Error::Config(format!("model '{}': config.json must contain id2label for PII decoding", cfg.name)))?;
 			Meta::Pii {
 				id2label,
-				output: pick_output(first, &["logits", "output0", "output"])
+				output: pick_output(session, &["logits", "output0", "output"])
 					.ok_or_else(|| Error::Config(format!("model '{}': no outputs", cfg.name)))?,
 			}
 		}
-	};
+	})
+}
 
-	let rss_after = crate::memory::rss_mb().unwrap_or(0);
-	let rss_used = rss_after.saturating_sub(rss_before);
-	tracing::info!(
-		model = cfg.name.as_str(),
-		kind = cfg.kind.as_str(),
-		source = %resolved.source,
-		model_mb,
-		replicas = sessions.len(),
-		eps = %eps.join(","),
-		max_len = %cfg.max_len.map(|v| v.to_string()).unwrap_or_else(|| "unset".into()),
-		batching = cfg.batching.enabled,
-		session_build_ms = session_ms,
-		elapsed_ms = t_start.elapsed().as_millis(),
-		ram_used_mb = rss_used,
-		ram_total_mb = rss_after,
-		"model loaded"
-	);
-	let pool = Arc::new(SessionPool::new(sessions, max_queue));
-	let extract: Arc<Extract> = match &meta {
+fn build_extract(meta: &Meta) -> Arc<Extract> {
+	match meta {
 		Meta::Embedding { pooling, output, normalize, dimensions } => pipeline::embedding::extractor(*pooling, output.clone(), *normalize, *dimensions),
 		Meta::Rerank { scoring, yes_id, no_id, output } => pipeline::rerank::extractor(*scoring, *yes_id, *no_id, output.clone()),
 		Meta::Zeroshot { output, .. } => pipeline::zeroshot::extractor(output.clone()),
 		Meta::Pii { id2label, output } => pipeline::pii::extractor(id2label.len(), output.clone()),
+	}
+}
+
+/// The graph the sessions run: the resolved file, or the server's own int8
+/// rewrite of it (`dtype: int8`, or `auto` with CPU-only execution) once it
+/// passed the quality gate. Any quantization problem falls back to the
+/// resolved file. Returns the path and a label for the startup log.
+fn choose_graph(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, eps: &[String], hf_cache: Option<&Path>) -> (PathBuf, &'static str) {
+	let wanted = match cfg.dtype {
+		Dtype::Int8 => true,
+		Dtype::Auto => eps.iter().all(|e| e == "cpu"),
+		Dtype::Fp32 | Dtype::Fp16 => false,
 	};
-	let batcher = cfg.batching.enabled.then(|| Batcher::new(pool.clone(), extract.clone(), cfg.batching));
-	Ok(Arc::new(LoadedModel {
-		cfg: cfg.clone(),
-		encoder,
-		pool,
-		extract,
-		batcher,
-		meta,
-		source: resolved.source,
-		eps,
-		max_len: cfg.max_len,
-		input_names,
-		output_names,
-	}))
+	let published = (resolved.model.clone(), "as published");
+	if !wanted {
+		return published;
+	}
+	let int8 = match quantize::cached_int8(&resolved.model, &hub::cache_root(hf_cache)) {
+		Ok(Some(path)) => path,
+		Ok(None) => return (resolved.model.clone(), "as published (nothing to quantize)"),
+		Err(e) => {
+			tracing::warn!(model = cfg.name.as_str(), error = %e, "int8 quantization failed; serving the published graph");
+			return published;
+		}
+	};
+	match quality_gate(cfg, resolved, encoder, &int8) {
+		Ok(true) => (int8, "int8 (per-channel, quantized by rs-infer)"),
+		Ok(false) => published,
+		Err(e) => {
+			tracing::warn!(model = cfg.name.as_str(), error = %e, "int8 quality check failed to run; serving the published graph");
+			published
+		}
+	}
+}
+
+/// Compares the published graph and its int8 rewrite on built-in calibration
+/// inputs, once per (graph, kind): the verdict is cached next to the int8 graph.
+fn quality_gate(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, int8: &Path) -> Result<bool> {
+	let verdict_file = int8.with_file_name(format!("quality-{}.txt", cfg.kind.as_str()));
+	if let Ok(verdict) = std::fs::read_to_string(&verdict_file) {
+		tracing::info!(model = cfg.name.as_str(), verdict = verdict.trim(), "int8 quality check (cached)");
+		return Ok(verdict.starts_with("pass"));
+	}
+	let enc = quantize::calibration(encoder, cfg.kind)?;
+	let mut reference_session = new_session(&resolved.model, cfg)?;
+	let extract = build_extract(&build_meta(cfg, resolved, encoder, &reference_session)?);
+	let reference = extract(&mut reference_session, &enc)?;
+	drop(reference_session);
+	let candidate = extract(&mut new_session(int8, cfg)?, &enc)?;
+	let check = quantize::compare(&reference, &candidate, &enc.attention_mask)?;
+	let verdict = format!("{} {} {:.4} (threshold {})", if check.pass { "pass" } else { "fail" }, check.metric, check.worst, check.threshold);
+	if let Err(e) = std::fs::write(&verdict_file, &verdict) {
+		tracing::warn!(error = %e, "cannot cache the int8 quality verdict");
+	}
+	if check.pass {
+		tracing::info!(model = cfg.name.as_str(), verdict, "int8 quality check passed");
+	} else {
+		tracing::warn!(model = cfg.name.as_str(), verdict, "int8 output drifts too far from the published graph; serving it instead (set dtype: fp32 to skip this check)");
+	}
+	Ok(check.pass)
 }

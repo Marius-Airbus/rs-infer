@@ -97,9 +97,14 @@ pub enum CoreMlComputeUnits {
 	CpuOnly,
 }
 
-/// Preferred weight format when several graph files exist in the model dir/repo.
-/// `auto` = fp32 first (fallback fp16 > quantized); explicit values reorder the
-/// candidate list so e.g. a quantized export wins over the fp32 default.
+/// Precision of the graph the model runs.
+/// - `auto`: on CPU-only execution, the server's own per-channel int8 rewrite of
+///   the fp32 graph (cached, kept only if it passes a quality check against
+///   fp32, see `quantize`); with GPU/CoreML execution providers, the published
+///   graph (fp32 first, else fp16 > quantized files).
+/// - `int8`: that int8 rewrite whatever the providers (the publisher's int8
+///   files if the repo has no fp32 graph).
+/// - `fp32` / `fp16`: the published graph of that format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Dtype {

@@ -84,7 +84,8 @@ models:
     max_len: 512
     replicas: 2
     eps: [cpu]
-    dtype: fp32            # or int8/fp16: picks model_int8.onnx / model_fp16.onnx variants
+    # dtype: auto          # default: int8 on CPU (quantized by the server, kept only if close
+    #                      # to fp32), published graph on GPU; or fp32 / fp16 / int8
     batching:              # cross-request dynamic batching, on by default (all model kinds)
       max_rows: 64         # max rows packed per forward
       max_tokens: 8192     # max padded tokens (rows x longest row) per forward
@@ -122,5 +123,5 @@ export and load-testing live in [`python/`](python/README.md).
 
 - Encoder-only zero-shot only (no seq2seq BART-MNLI exports).
 - Cross-request batching is opportunistic: rows join the next forward, never one already running.
-- `dtype: int8` uses ORT dynamic quantization: activation scales are per-tensor, so results shift slightly with batch padding — benchmark quality before serving it.
+- INT8 (default on CPU) quantizes activations dynamically with one scale per tensor: results shift slightly with batch padding, and models with activation outliers (decoder embeddings like Qwen3, some token classifiers) fail the built-in quality check and run in fp32.
 - No auth/TLS — put it behind a reverse proxy.
