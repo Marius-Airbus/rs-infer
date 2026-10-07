@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
 	config::Pooling,
 	model::Meta,
-	pipeline::{blocking, forward_rows, run_forward, Fwd},
+	pipeline::{blocking, forward_rows, run_forward, warn_truncated, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -26,7 +26,8 @@ pub async fn embed(model: &Arc<LoadedModel>, texts: Vec<String>, queue_wait: Dur
 
 	if let Some(batcher) = &model.batcher {
 		let m = Arc::clone(model);
-		let rows = blocking(move || m.encoder.encode_rows(&texts)).await??;
+		let (rows, truncated) = blocking(move || m.encoder.encode_rows(&texts)).await??;
+		warn_truncated(model, truncated);
 		let token_count = rows.iter().map(|r| r.len()).sum();
 		let vectors = batcher.submit(rows, queue_wait).await?;
 		tracing::trace!(model = model.name(), rows = vectors.len(), tokens = token_count, "embedding done (batched)");
@@ -35,6 +36,7 @@ pub async fn embed(model: &Arc<LoadedModel>, texts: Vec<String>, queue_wait: Dur
 
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_texts(&texts)).await??;
+	warn_truncated(model, enc.truncated);
 	let token_count = enc.token_count();
 	let max_batch = model.cfg.max_batch;
 

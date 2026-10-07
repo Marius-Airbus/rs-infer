@@ -18,6 +18,8 @@ pub struct Encoded {
 	pub offsets: Vec<Vec<(usize, usize)>>,
 	pub batch: usize,
 	pub seq: usize,
+	/// Inputs longer than `max_len` that the tokenizer cut (it kept the overflow aside).
+	pub truncated: usize,
 }
 
 impl Encoded {
@@ -44,6 +46,7 @@ impl Encoded {
 					offsets: self.offsets.get(start..end).map(|o| cut(o, seq)).unwrap_or_default(),
 					batch: end - start,
 					seq,
+					truncated: 0,
 				}
 			})
 			.collect()
@@ -95,6 +98,7 @@ impl Encoder {
 			offsets: Vec::new(),
 			batch: encodings.len(),
 			seq: encodings.first().map(|x| x.len()).unwrap_or(0),
+			truncated: encodings.iter().filter(|x| !x.get_overflowing().is_empty()).count(),
 		};
 		for enc in &encodings {
 			e.input_ids.push(enc.get_ids().iter().map(|&i| i as i64).collect());
@@ -117,21 +121,24 @@ impl Encoder {
 	}
 
 	/// Token ids per text, without batch padding (right-pad stripped via the
-	/// attention mask). For feeding into the cross-request batcher.
-	pub fn encode_rows(&self, texts: &[String]) -> Result<Vec<Vec<u32>>> {
+	/// attention mask), plus how many texts were truncated. For feeding into the
+	/// cross-request batcher.
+	pub fn encode_rows(&self, texts: &[String]) -> Result<(Vec<Vec<u32>>, usize)> {
 		let inputs: Vec<EncodeInput<'_>> = texts.iter().map(|t| EncodeInput::from(Cow::Borrowed(t.as_str()))).collect();
 		let encodings = self
 			.tokenizer
 			.encode_batch(inputs, true)
 			.map_err(|e| Error::Tokenize(e.to_string()))?;
-		Ok(encodings
+		let truncated = encodings.iter().filter(|enc| !enc.get_overflowing().is_empty()).count();
+		let rows = encodings
 			.iter()
 			.map(|enc| {
 				let mask = enc.get_attention_mask();
 				let real = mask.iter().position(|&m| m == 0).unwrap_or(mask.len());
 				enc.get_ids()[..real].to_vec()
 			})
-			.collect())
+			.collect();
+		Ok((rows, truncated))
 	}
 
 	pub fn encode_texts_offsets(&self, texts: &[String]) -> Result<Encoded> {

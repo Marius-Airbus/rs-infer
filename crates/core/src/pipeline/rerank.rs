@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
 	config::Scoring,
 	model::Meta,
-	pipeline::{blocking, forward_rows, softmax, Fwd},
+	pipeline::{blocking, forward_rows, softmax, warn_truncated, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -36,6 +36,7 @@ pub async fn score_text_pairs(model: &Arc<LoadedModel>, pairs: Vec<(String, Stri
 
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
+	warn_truncated(model, enc.truncated);
 	let token_count = enc.token_count();
 	let max_batch = model.cfg.max_batch;
 

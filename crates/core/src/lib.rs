@@ -16,6 +16,10 @@ pub mod pool;
 pub mod registry;
 pub mod tokenize;
 
+#[cfg(test)]
+#[path = "tests/fixtures.rs"]
+pub(crate) mod test_fixtures;
+
 pub use config::{Config, Kind, ModelConfig};
 pub use error::{Error, Result};
 pub use model::LoadedModel;

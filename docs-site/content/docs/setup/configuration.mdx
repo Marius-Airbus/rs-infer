@@ -82,7 +82,7 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 | `subfolder` | string | *(unset)* | Subdirectory inside the repo/`path` to look for files, e.g. `onnx`. |
 | `file` | string | *(unset)* | Pin an exact graph filename (e.g. `onnx/model_quantized.onnx`); overrides the automatic `model.onnx` > `fp16` > `quantized` preference. |
 | `tokenizer_hf` | string | `hf` | Repo to take `tokenizer.json`/`config.json` from, for model-only ONNX exports. |
-| `max_len` | int | *(unset)* | Tokenizer truncation length. |
+| `max_len` | int | *(unset)* | Tokenizer truncation length. Longer inputs are truncated and a `WARN` log line reports how many. |
 | `replicas` | int | `2` | Number of concurrent ORT sessions (pool replicas) — a memory vs throughput dial. |
 | `max_batch` | int | `32` | Max rows per forward pass. Bigger requests (many texts, rerank documents, zero-shot text × label pairs, PII windows) run as successive slices, bounding activation memory per request. |
 | `intra_threads` | int | `0` | intra-op threads per session; `0` = ORT default. |

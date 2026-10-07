@@ -10,6 +10,7 @@ use ort::session::{OutputSelector, RunOptions, Session, SessionOutputs};
 use crate::{
 	model::OutSel,
 	tokenize::{make_inputs, Encoded},
+	LoadedModel,
 };
 
 pub(crate) struct Fwd<'a> {
@@ -43,6 +44,14 @@ pub(crate) fn run_forward<R>(
 		shape: shape.iter().map(|&d| d as usize).collect(),
 		data,
 	})
+}
+
+/// The tokenizer cuts inputs longer than `max_len`; say so rather than silently
+/// embedding or scoring a prefix.
+pub(crate) fn warn_truncated(model: &LoadedModel, truncated: usize) {
+	if truncated > 0 {
+		tracing::warn!(model = model.name(), inputs = truncated, max_len = ?model.max_len, "inputs longer than max_len were truncated");
+	}
 }
 
 /// Forwards `enc` in slices of at most `max_rows` rows so one big request cannot

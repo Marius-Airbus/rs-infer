@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
 	model::Meta,
-	pipeline::{blocking, forward_rows, softmax, Fwd},
+	pipeline::{blocking, forward_rows, softmax, warn_truncated, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -47,6 +47,7 @@ pub async fn classify(model: &Arc<LoadedModel>, texts: Vec<String>, candidates: 
 
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
+	warn_truncated(model, enc.truncated);
 	let token_count = enc.token_count();
 	let max_batch = model.cfg.max_batch;
 	let pooled = model.pool.acquire(queue_wait).await?;
@@ -166,6 +167,7 @@ pub async fn classify_true_false(model: &Arc<LoadedModel>, inputs: Vec<String>, 
 
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
+	warn_truncated(model, enc.truncated);
 	let token_count = enc.token_count();
 	let max_batch = model.cfg.max_batch;
 	let pooled = model.pool.acquire(queue_wait).await?;

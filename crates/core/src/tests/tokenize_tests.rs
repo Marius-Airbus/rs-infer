@@ -1,6 +1,7 @@
 //! Unit tests for [`tokenize`](super).
 
-use super::Encoded;
+use super::{Encoded, Encoder};
+use crate::test_fixtures::word_tokenizer;
 
 /// Right-padded batch: one row per entry of `lens` (real tokens), padded to `seq`.
 fn encoded(lens: &[usize], seq: usize) -> Encoded {
@@ -16,7 +17,25 @@ fn encoded(lens: &[usize], seq: usize) -> Encoded {
 		offsets: Vec::new(),
 		batch: lens.len(),
 		seq,
+		truncated: 0,
 	}
+}
+
+fn strings(v: &[&str]) -> Vec<String> {
+	v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn counts_truncated_inputs() {
+	let enc = Encoder::new(&word_tokenizer(), Some(6)).unwrap();
+	// 3 words + [CLS]/[SEP] fit in 6 tokens; 8 words do not.
+	let texts = strings(&["a b c", "a b c d e f g h"]);
+	assert_eq!(enc.encode_texts(&texts).unwrap().truncated, 1);
+	let (rows, truncated) = enc.encode_rows(&texts).unwrap();
+	assert_eq!((rows[0].len(), rows[1].len(), truncated), (5, 6, 1));
+	let pairs = vec![("q".to_string(), "a b".to_string()), ("q".to_string(), "a b c d e f g".to_string())];
+	assert_eq!(enc.encode_pairs(&pairs).unwrap().truncated, 1);
+	assert_eq!(enc.encode_texts(&strings(&["a", "b c"])).unwrap().truncated, 0);
 }
 
 #[test]
