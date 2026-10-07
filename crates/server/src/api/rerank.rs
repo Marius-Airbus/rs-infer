@@ -17,7 +17,7 @@ pub async fn rerank_h(State(state): State<AppState>, Json(req): Json<RerankReque
 	if req.documents.is_empty() {
 		return Err(ApiError(rsinfer_core::Error::BadRequest("`documents` is empty".into())));
 	}
-	let outcome = rerank::score_pairs(&model, req.query, req.documents.clone(), state.queue_wait).await?;
+	let outcome = rerank::score_pairs(&model, req.query, req.documents.clone(), req.max_chunks_per_doc, state.queue_wait).await?;
 	let return_docs = req.return_documents.unwrap_or(true);
 
 	let mut scored = outcome.scores;

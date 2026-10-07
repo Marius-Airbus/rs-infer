@@ -26,6 +26,25 @@ fn strings(v: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn split_text_cuts_long_text_into_token_chunks() {
+	// max_len 6 < 10 words: the tokenizer's overflow windows are joined back first.
+	let enc = Encoder::new(&word_tokenizer(), Some(6), 0).unwrap();
+	let text = (0..10).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+	assert_eq!(enc.split_text(&text, 4).unwrap(), ["w0 w1 w2 w3", "w4 w5 w6 w7", "w8 w9"]);
+	assert_eq!(enc.split_text("", 4).unwrap(), [""]);
+}
+
+#[test]
+fn doc_chunk_budget_leaves_room_for_query_and_specials() {
+	let enc = Encoder::new(&word_tokenizer(), Some(16), 0).unwrap();
+	// 16 - 2 query tokens - 3 pair specials ([CLS] q [SEP] d [SEP]).
+	assert_eq!(enc.doc_chunk_budget("q1 q2").unwrap(), Some(11));
+	// A query that eats the window still leaves a quarter of it for the document.
+	assert_eq!(enc.doc_chunk_budget(&"q ".repeat(20)).unwrap(), Some(4));
+	assert_eq!(Encoder::new(&word_tokenizer(), None, 0).unwrap().doc_chunk_budget("q").unwrap(), None);
+}
+
+#[test]
 fn counts_truncated_inputs() {
 	let enc = Encoder::new(&word_tokenizer(), Some(6), 0).unwrap();
 	// 3 words + [CLS]/[SEP] fit in 6 tokens; 8 words do not.

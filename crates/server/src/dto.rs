@@ -69,7 +69,7 @@ pub struct RerankRequest {
 	pub top_n: Option<usize>,
 	/// Include document text in the response (vLLM default: true).
 	pub return_documents: Option<bool>,
-	#[allow(dead_code)]
+	/// Split long documents into up to this many chunks; score = best chunk.
 	pub max_chunks_per_doc: Option<usize>,
 }
 

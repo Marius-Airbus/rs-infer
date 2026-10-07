@@ -628,7 +628,10 @@ components:
           description: Include the document text in each result.
         max_chunks_per_doc:
           type: [integer, 'null']
-          description: Accepted for Cohere compatibility; currently unused.
+          description: |
+            Cohere semantics: a document longer than the model's `max_len` (next to the
+            query) is split into consecutive chunks, at most this many from the start, and
+            scores as its best chunk. Unset or 0: long documents are truncated.
       additionalProperties: false
 
     RerankResponse:

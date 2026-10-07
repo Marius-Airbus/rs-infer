@@ -43,6 +43,14 @@ fn sigmoid_two_column_is_sigmoid_of_logit_diff() {
 }
 
 #[test]
+fn document_scores_as_its_best_chunk() {
+	let chunk = |index, score| Scored { index, score };
+	// Chunks 0-1 belong to document 0, chunk 2 to document 1.
+	let best = best_per_doc(&[chunk(0, 0.2), chunk(1, 0.9), chunk(2, 0.5)], &[0, 0, 1], 2);
+	assert_eq!(best.iter().map(|s| (s.index, s.score)).collect::<Vec<_>>(), [(0, 0.9), (1, 0.5)]);
+}
+
+#[test]
 fn yes_no_uses_last_real_token() {
 	// [B=1, S=2, V=3]: token ids: yes=1, no=2; both positions real -> score at last
 	let d: Vec<f32> = vec![0.0, 0.0, 10.0, /* pos 1 */ 0.0, 5.0, 0.0];

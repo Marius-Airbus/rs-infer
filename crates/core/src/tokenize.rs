@@ -4,7 +4,7 @@ use ort::{
 	session::{Session, SessionInputs, SessionInputValue},
 	value::{Outlet, Tensor, TensorElementType},
 };
-use tokenizers::{EncodeInput, Encoding, PaddingParams, Tokenizer, TruncationParams, TruncationDirection};
+use tokenizers::{EncodeInput, Encoding, PaddingParams, PostProcessor, Tokenizer, TruncationParams, TruncationDirection};
 
 use crate::{Error, Result};
 
@@ -55,6 +55,7 @@ impl Encoded {
 
 pub struct Encoder {
 	tokenizer: Tokenizer,
+	max_len: Option<usize>,
 	pub vocab_size: usize,
 }
 
@@ -84,7 +85,41 @@ impl Encoder {
 				.map_err(|e| Error::Tokenize(e.to_string()))?;
 		}
 		let vocab = tokenizer.get_vocab(true).len();
-		Ok(Self { tokenizer, vocab_size: vocab })
+		Ok(Self { tokenizer, max_len, vocab_size: vocab })
+	}
+
+	/// Tokens left for a document next to `query` in one pair input (`max_len`
+	/// minus the query and the pair's special tokens), at least a quarter of
+	/// `max_len`. `None` when no `max_len` is configured.
+	pub fn doc_chunk_budget(&self, query: &str) -> Result<Option<usize>> {
+		let Some(max) = self.max_len else { return Ok(None) };
+		let query_tokens = self.tokenizer.encode(query, false).map_err(|e| Error::Tokenize(e.to_string()))?.len();
+		let specials = self.tokenizer.get_post_processor().map_or(0, |p| p.added_tokens(true));
+		Ok(Some(max.saturating_sub(query_tokens + specials).max(max / 4).max(1)))
+	}
+
+	/// Splits `text` into consecutive chunks of at most `max_tokens` tokens, cut at
+	/// token boundaries. Always returns at least one chunk.
+	pub fn split_text(&self, text: &str, max_tokens: usize) -> Result<Vec<String>> {
+		let mut enc = self.tokenizer.encode(text, false).map_err(|e| Error::Tokenize(e.to_string()))?;
+		// Byte offsets of every content token; inputs over max_len come back as
+		// overflow windows, possibly overlapping (stride), so skip repeats.
+		let mut offsets: Vec<(usize, usize)> = Vec::new();
+		let overflow = enc.take_overflowing();
+		for part in std::iter::once(&enc).chain(&overflow) {
+			for &(s, e) in part.get_offsets() {
+				if e > s && s >= offsets.last().map_or(0, |o| o.1) {
+					offsets.push((s, e));
+				}
+			}
+		}
+		if offsets.is_empty() {
+			return Ok(vec![text.to_string()]);
+		}
+		Ok(offsets
+			.chunks(max_tokens.max(1))
+			.map(|c| text.get(c[0].0..c[c.len() - 1].1).unwrap_or(text).to_string())
+			.collect())
 	}
 
 	pub fn single_token_id(&self, word: &str) -> Option<u32> {
