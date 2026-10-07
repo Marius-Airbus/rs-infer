@@ -110,27 +110,28 @@ pub enum Dtype {
 	Int8,
 }
 
-/// Opt-in cross-request batching for embedding models: the server spreads the queue
-/// backlog over free session replicas, packing up to `max_rows` rows / `max_tokens`
-/// real tokens per forward. A row arriving to an empty queue is dispatched
-/// immediately, so batching adds no latency; it only amortizes per-forward cost
-/// when many requests overlap. On backends where forward time scales linearly with
-/// rows (CPU fp32) it mainly helps small-request traffic and is neutral for big
-/// single-request batches.
+/// Cross-request batching (on by default, every model kind): rows from concurrent
+/// requests are sorted by length and packed into forwards of up to `max_rows`
+/// rows and `max_tokens` padded tokens, spread over the free session replicas. A
+/// row arriving to an empty queue is dispatched immediately, so batching adds no
+/// latency; it amortizes per-forward cost when requests overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Batching {
-	/// Max token rows per assembled batch.
+	/// `false`: every request runs as its own forward(s) (`max_batch`-row slices).
+	pub enabled: bool,
+	/// Max rows per assembled batch.
 	pub max_rows: usize,
-	/// Soft cap on real (unpadded) tokens per batch.
+	/// Max padded tokens (rows x longest row) per batch; bounds activation memory.
 	pub max_tokens: usize,
-	/// Max rows queued (in + waiting) before shedding with 429.
+	/// Max rows queued (in + waiting) before shedding with 429; a request with
+	/// more rows than this bypasses the queue.
 	pub queue_rows: usize,
 }
 
 impl Default for Batching {
 	fn default() -> Self {
-		Self { max_rows: 64, max_tokens: 4096, queue_rows: 1024 }
+		Self { enabled: true, max_rows: 64, max_tokens: 8192, queue_rows: 1024 }
 	}
 }
 
@@ -217,9 +218,9 @@ pub struct ModelConfig {
 	/// Make this model the default for its kind even if loaded later.
 	#[serde(default)]
 	pub default: bool,
-	/// Cross-request dynamic batching for embedding models (opt-in). Absent = per-request forwards.
+	/// Cross-request dynamic batching (on by default; `batching: { enabled: false }` to opt out).
 	#[serde(default)]
-	pub batching: Option<Batching>,
+	pub batching: Batching,
 	/// Max rows per forward pass; a bigger request runs as successive slices, so
 	/// one request cannot blow up activation memory.
 	#[serde(default = "default_max_batch")]
@@ -312,7 +313,7 @@ impl Default for ModelConfig {
 			intra_threads: 0,
 			eps: vec![],
 			default: false,
-			batching: None,
+			batching: Batching::default(),
 			max_batch: default_max_batch(),
 			pooling: Pooling::Auto,
 			normalize: true,

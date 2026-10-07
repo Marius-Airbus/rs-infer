@@ -85,17 +85,22 @@ models:
     replicas: 2
     eps: [cpu]
     dtype: fp32            # or int8/fp16: picks model_int8.onnx / model_fp16.onnx variants
-    batching:              # optional (embedding models only): cross-request dynamic batching
-      max_rows: 64         # max token rows packed per forward
-      max_tokens: 4096     # soft cap on real tokens per forward
+    batching:              # cross-request dynamic batching, on by default (all model kinds)
+      max_rows: 64         # max rows packed per forward
+      max_tokens: 8192     # max padded tokens (rows x longest row) per forward
       queue_rows: 1024     # queue depth before 429
+      # enabled: false     # opt out: each request runs as its own forward(s)
 ```
 
-**Batching:** rows from concurrent requests are spread over free session replicas
-and packed into larger forwards; a row arriving to an empty queue is dispatched
-immediately, so it never adds latency. On CPU it mostly helps many-small-request
-traffic (M5 Pro measurements: +12% docs/s at 1-doc requests, ~neutral at 16-doc
-requests; enable it where per-forward overhead is high, e.g. GPU).
+**Batching:** rows from concurrent requests are sorted by length and packed into
+larger forwards spread over the free session replicas; a row arriving to an empty
+queue is dispatched immediately, so it never adds latency. It pays off when many
+small requests overlap (14-core i7, 64 concurrent clients: 1-text e5-small
+embeddings 117 -> 440 req/s, 1-document ms-marco rerank 403 -> 800 req/s).
+
+**Threads:** all sessions share one ONNX Runtime thread pool sized to the
+physical cores (`server.threads`). Using every logical core is slower: SMT
+siblings and efficiency cores stall each parallel op.
 
 **CoreML caveat:** for small encoder models CoreML is often *slower* than CPU
 (ORT splits the graph into many CPU↔CoreML partitions, ~3x slower for
@@ -116,6 +121,6 @@ export and load-testing live in [`python/`](python/README.md).
 ## Known limitations
 
 - Encoder-only zero-shot only (no seq2seq BART-MNLI exports).
-- Cross-request batching is embedding-only and opportunistic (no mid-forward insertion); rerank/zeroshot/pii batch within one request.
+- Cross-request batching is opportunistic: rows join the next forward, never one already running.
 - `dtype: int8` uses ORT dynamic quantization: activation scales are per-tensor, so results shift slightly with batch padding — benchmark quality before serving it.
 - No auth/TLS — put it behind a reverse proxy.

@@ -166,7 +166,6 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 	tracing::info!(bind = %config.server.bind, "resolving and loading configured models (first run downloads from the HF Hub)");
 	let started = std::time::Instant::now();
 	let registry = Arc::new(Registry::load(config.clone()).await?);
-	registry.start_batchers();
 	tracing::info!(
 		elapsed_ms = started.elapsed().as_millis(),
 		models = registry.infos().len(),

@@ -85,7 +85,8 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 | `tokenizer_hf` | string | `hf` | Repo to take `tokenizer.json`/`config.json` from, for model-only ONNX exports. |
 | `max_len` | int | *(unset)* | Tokenizer truncation length. Longer inputs are truncated and a `WARN` log line reports how many — except for `pii` models, which scan long texts in windows of `max_len` tokens overlapping by a quarter, so no PII escapes detection. |
 | `replicas` | int | `2` | Number of concurrent ORT sessions (pool replicas) — a memory vs throughput dial. |
-| `max_batch` | int | `32` | Max rows per forward pass. Bigger requests (many texts, rerank documents, zero-shot text × label pairs, PII windows) run as successive slices, bounding activation memory per request. |
+| `max_batch` | int | `32` | Max rows per forward pass when `batching.enabled` is `false` (or a request is larger than `batching.queue_rows`): bigger requests run as successive slices, bounding activation memory. |
+| `batching` | object | *(on)* | Cross-request dynamic batching, for every model kind: `enabled` (`true`), `max_rows` (`64`) rows and `max_tokens` (`8192`) padded tokens (rows × longest row) per forward, `queue_rows` (`1024`) queued rows before `429`. Rows of concurrent requests are sorted by length and packed into shared forwards; a lone request is dispatched immediately. |
 | `intra_threads` | int | `0` | `0` = sessions run on the shared pool (`server.threads`). `> 0` = each session of this model gets its own pool of that many threads (e.g. to isolate a model, or on NUMA hosts). |
 | `eps` | list[string] | `[cpu]` | Execution provider priority list (see [Execution providers](#execution-providers)). |
 | `default` | bool | `false` | Make this model the default for its kind (requests without a `model` field use it). If unset, the single model of a kind is the default. |

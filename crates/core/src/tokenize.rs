@@ -51,6 +51,49 @@ impl Encoded {
 			})
 			.collect()
 	}
+
+	/// Unpadded rows (right padding stripped via the attention mask), e.g. for
+	/// the cross-request batcher.
+	pub fn into_rows(self) -> Vec<Row> {
+		self.input_ids
+			.into_iter()
+			.zip(self.token_type_ids)
+			.zip(&self.attention_mask)
+			.map(|((mut ids, mut type_ids), mask)| {
+				let len = mask.iter().filter(|&&m| m != 0).count();
+				ids.truncate(len);
+				type_ids.truncate(len);
+				Row { ids, type_ids }
+			})
+			.collect()
+	}
+
+	/// Right-padded batch of `rows`.
+	pub fn from_rows(rows: &[Row]) -> Encoded {
+		let seq = rows.iter().map(|r| r.ids.len()).max().unwrap_or(0);
+		let pad = |v: &[i64]| {
+			let mut v = v.to_vec();
+			v.resize(seq, 0);
+			v
+		};
+		Encoded {
+			input_ids: rows.iter().map(|r| pad(&r.ids)).collect(),
+			attention_mask: rows.iter().map(|r| pad(&vec![1; r.ids.len()])).collect(),
+			token_type_ids: rows.iter().map(|r| pad(&r.type_ids)).collect(),
+			offsets: Vec::new(),
+			batch: rows.len(),
+			seq,
+			truncated: 0,
+		}
+	}
+}
+
+/// One unpadded model input row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+	pub ids: Vec<i64>,
+	/// Segment ids (0 for the first text of a pair, 1 for the second).
+	pub type_ids: Vec<i64>,
 }
 
 pub struct Encoder {
@@ -166,27 +209,6 @@ impl Encoder {
 		Ok(Self::from_encodings(encodings, false))
 	}
 
-	/// Token ids per text, without batch padding (right-pad stripped via the
-	/// attention mask), plus how many texts were truncated. For feeding into the
-	/// cross-request batcher.
-	pub fn encode_rows(&self, texts: &[String]) -> Result<(Vec<Vec<u32>>, usize)> {
-		let inputs: Vec<EncodeInput<'_>> = texts.iter().map(|t| EncodeInput::from(Cow::Borrowed(t.as_str()))).collect();
-		let encodings = self
-			.tokenizer
-			.encode_batch(inputs, true)
-			.map_err(|e| Error::Tokenize(e.to_string()))?;
-		let truncated = encodings.iter().filter(|enc| !enc.get_overflowing().is_empty()).count();
-		let rows = encodings
-			.iter()
-			.map(|enc| {
-				let mask = enc.get_attention_mask();
-				let real = mask.iter().position(|&m| m == 0).unwrap_or(mask.len());
-				enc.get_ids()[..real].to_vec()
-			})
-			.collect();
-		Ok((rows, truncated))
-	}
-
 	pub fn encode_texts_offsets(&self, texts: &[String]) -> Result<Encoded> {
 		let inputs: Vec<EncodeInput<'_>> = texts.iter().map(|t| EncodeInput::from(Cow::Borrowed(t.as_str()))).collect();
 		let encodings = self
@@ -277,53 +299,6 @@ pub fn make_inputs(session: &Session, enc: &Encoded) -> Result<SessionInputs<'st
 			}
 		};
 		map.push((Cow::Owned(name.to_string()), tensor.into()));
-	}
-	Ok(SessionInputs::ValueMap(map))
-}
-
-/// Builds raw token-id inputs for pre-tokenized inputs (OpenAI numeric token arrays).
-pub fn make_token_inputs(session: &Session, token_rows: &[Vec<u32>]) -> Result<SessionInputs<'static, 'static>> {
-	let seq = token_rows.iter().map(|r| r.len()).max().unwrap_or(0);
-	let mask = token_rows.iter().map(|r| {
-		let mut v = vec![1i64; r.len()];
-		v.resize(seq, 0);
-		v
-	});
-	let mut ids = Vec::new();
-	for r in token_rows {
-		let mut v: Vec<i64> = r.iter().map(|&i| i as i64).collect();
-		v.resize(seq, 0);
-		ids.extend_from_slice(&v);
-	}
-	let types = vec![0i64; ids.len()];
-	let shape = vec![token_rows.len() as i64, seq as i64];
-
-	let mut map: Vec<(Cow<'static, str>, ort::session::SessionInputValue<'static>)> = Vec::new();
-	let mut pushed = Vec::new();
-	let masks: Vec<Vec<i64>> = mask.collect();
-	let flat_masks: Vec<i64> = masks.iter().flatten().copied().collect();
-	for input in session.inputs() {
-		let name = input.name();
-		pushed.push(name.to_string());
-		// Decoder-only exports (e.g. Qwen3-Embedding): a single-pass embedding
-		// forward runs with an empty KV cache.
-		if name.starts_with("past_key_values.") {
-			map.push((Cow::Owned(name.to_string()), empty_kv_cache(input, token_rows.len())?));
-			continue;
-		}
-		let data: Vec<i64> = match name {
-			"input_ids" => ids.clone(),
-			"attention_mask" => flat_masks.clone(),
-			"token_type_ids" => types.clone(),
-			// HF convention: position_ids = cumsum(attention_mask) - 1.
-			"position_ids" => position_ids(&masks),
-			other => {
-				return Err(Error::Ort(ort::Error::new(format!(
-					"model requires unsupported input '{other}'; required inputs: {pushed:?}"
-				))));
-			}
-		};
-		map.push((Cow::Owned(name.to_string()), Tensor::from_array((shape.clone(), data))?.into()));
 	}
 	Ok(SessionInputs::ValueMap(map))
 }

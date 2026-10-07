@@ -1,6 +1,6 @@
 //! Unit tests for [`tokenize`](super).
 
-use super::{Encoded, Encoder};
+use super::{Encoded, Encoder, Row};
 use crate::test_fixtures::word_tokenizer;
 
 /// Right-padded batch: one row per entry of `lens` (real tokens), padded to `seq`.
@@ -50,8 +50,6 @@ fn counts_truncated_inputs() {
 	// 3 words + [CLS]/[SEP] fit in 6 tokens; 8 words do not.
 	let texts = strings(&["a b c", "a b c d e f g h"]);
 	assert_eq!(enc.encode_texts(&texts).unwrap().truncated, 1);
-	let (rows, truncated) = enc.encode_rows(&texts).unwrap();
-	assert_eq!((rows[0].len(), rows[1].len(), truncated), (5, 6, 1));
 	let pairs = vec![("q".to_string(), "a b".to_string()), ("q".to_string(), "a b c d e f g".to_string())];
 	assert_eq!(enc.encode_pairs(&pairs).unwrap().truncated, 1);
 	assert_eq!(enc.encode_texts(&strings(&["a", "b c"])).unwrap().truncated, 0);
@@ -73,4 +71,27 @@ fn split_keeps_a_small_batch_whole() {
 	let parts = enc.split(32);
 	assert_eq!(parts.len(), 1);
 	assert_eq!(parts[0].input_ids, enc.input_ids);
+}
+
+#[test]
+fn rows_strip_padding_and_rebatch() {
+	let enc = Encoder::new(&word_tokenizer(), Some(16), 0).unwrap();
+	let pairs = vec![("q".to_string(), "a b c".to_string()), ("q".to_string(), "a".to_string())];
+	let batch = enc.encode_pairs(&pairs).unwrap();
+	let rows = batch.into_rows();
+	// [CLS] q [SEP] a b c [SEP] / [CLS] q [SEP] a [SEP]: padding gone, segments kept.
+	assert_eq!(rows.iter().map(|r| r.ids.len()).collect::<Vec<_>>(), [7, 5]);
+	assert_eq!(rows[1].type_ids, [0, 0, 0, 1, 1]);
+	let rebatched = Encoded::from_rows(&rows);
+	assert_eq!((rebatched.batch, rebatched.seq, rebatched.token_count()), (2, 7, 12));
+	assert_eq!(rebatched.attention_mask[1], [1, 1, 1, 1, 1, 0, 0]);
+	assert_eq!(rebatched.into_rows(), rows);
+}
+
+#[test]
+fn from_rows_pads_token_type_ids() {
+	let rows = [Row { ids: vec![5, 6], type_ids: vec![0, 1] }, Row { ids: vec![7], type_ids: vec![0] }];
+	let enc = Encoded::from_rows(&rows);
+	assert_eq!(enc.token_type_ids, vec![vec![0, 1], vec![0, 0]]);
+	assert_eq!(enc.input_ids, vec![vec![5, 6], vec![7, 0]]);
 }

@@ -2,9 +2,12 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serde::Serialize;
 
+use ort::session::Session;
+
 use crate::{
-	model::Meta,
-	pipeline::{blocking, forward_rows, Fwd},
+	model::{Meta, OutSel},
+	pipeline::{blocking, forward, run_rows, Extract, Fwd, RowOut},
+	tokenize::Encoded,
 	Error, LoadedModel, Result,
 };
 
@@ -28,14 +31,14 @@ pub struct DetectOutput {
 
 /// Runs token classification and decodes BIO/BIOES spans into entities.
 pub async fn detect(model: &Arc<LoadedModel>, texts: Vec<String>, threshold: Option<f64>, queue_wait: Duration) -> Result<DetectOutput> {
-	let Meta::Pii { id2label, output } = &model.meta else {
+	let Meta::Pii { id2label, .. } = &model.meta else {
 		return Err(Error::KindMismatch {
 			name: model.name().into(),
 			expected: "pii",
 			actual: model.kind().as_str(),
 		});
 	};
-	let (id2label, output) = (id2label.clone(), output.clone());
+	let id2label = id2label.clone();
 	let threshold = threshold.unwrap_or(model.cfg.threshold).clamp(0.0, 1.0);
 
 	// Texts longer than max_len come back as several overlapping windows (rows),
@@ -44,14 +47,7 @@ pub async fn detect(model: &Arc<LoadedModel>, texts: Vec<String>, threshold: Opt
 	let (enc, owners, texts) = blocking(move || m.encoder.encode_texts_windows(&texts).map(|(enc, owners)| (enc, owners, texts))).await??;
 	let token_count = enc.token_count();
 	let offsets = enc.offsets.clone();
-	let pooled = model.pool.acquire(queue_wait).await?;
-	let n_labels = id2label.len();
-	let max_batch = model.cfg.max_batch;
-	let per_token = pooled
-		.run_blocking(move |session| -> Result<Vec<Vec<(usize, f64)>>> {
-			forward_rows(session, &enc, max_batch, &output, |fwd, _| argmax_probs(&fwd, n_labels))
-		})
-		.await?;
+	let per_token = run_rows(model, enc, queue_wait).await?.into_iter().map(RowOut::into_tokens).collect::<Result<Vec<_>>>()?;
 	let mut windows: Vec<Vec<Window>> = vec![Vec::new(); texts.len()];
 	for ((row, row_offsets), owner) in per_token.into_iter().zip(offsets).zip(owners) {
 		// Content tokens only: special and pad tokens have empty (0,0) offsets.
@@ -88,6 +84,15 @@ fn stitch_windows(windows: Vec<Window>) -> Window {
 		offsets.extend_from_slice(&w_offsets[from_earlier..]);
 	}
 	(preds, offsets)
+}
+
+/// Batch extractor for token-classification models: per token, the argmax label
+/// and its probability.
+pub(crate) fn extractor(n_labels: usize, output: OutSel) -> Arc<Extract> {
+	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
+		let rows = forward(session, enc, &output, |fwd| argmax_probs(&fwd, n_labels))?;
+		Ok(rows.into_iter().map(RowOut::Tokens).collect())
+	})
 }
 
 /// Per token: (predicted label id, softmax probability of that label).

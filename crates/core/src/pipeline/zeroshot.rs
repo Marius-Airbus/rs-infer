@@ -1,8 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
+use ort::session::Session;
+
 use crate::{
-	model::Meta,
-	pipeline::{blocking, forward_rows, softmax, warn_truncated, Fwd},
+	model::{Meta, OutSel},
+	pipeline::{blocking, forward, run_rows, softmax, warn_truncated, Extract, RowOut},
+	tokenize::Encoded,
 	Error, LoadedModel, Result,
 };
 
@@ -24,14 +27,14 @@ pub struct ClassOutput {
 /// entailment/contradiction logits are compared per hypothesis and aggregated:
 /// single-label → softmax over labels, multi-label → sigmoid per label (HF-compatible).
 pub async fn classify(model: &Arc<LoadedModel>, texts: Vec<String>, candidates: Vec<String>, multi_label: bool, queue_wait: Duration) -> Result<ClassOutput> {
-	let Meta::Zeroshot { entailment, contradiction, template, output } = &model.meta else {
+	let Meta::Zeroshot { entailment, contradiction, template, .. } = &model.meta else {
 		return Err(Error::KindMismatch {
 			name: model.name().into(),
 			expected: "zeroshot",
 			actual: model.kind().as_str(),
 		});
 	};
-	let (entailment, contradiction, template, output) = (*entailment, *contradiction, template.clone(), output.clone());
+	let (entailment, contradiction, template) = (*entailment, *contradiction, template.clone());
 	if candidates.is_empty() {
 		return Err(Error::BadRequest("candidate_labels must not be empty".into()));
 	}
@@ -49,13 +52,7 @@ pub async fn classify(model: &Arc<LoadedModel>, texts: Vec<String>, candidates: 
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
 	warn_truncated(model, enc.truncated);
 	let token_count = enc.token_count();
-	let max_batch = model.cfg.max_batch;
-	let pooled = model.pool.acquire(queue_wait).await?;
-	let per_class = pooled
-		.run_blocking(move |session| -> Result<Vec<f64>> {
-			forward_rows(session, &enc, max_batch, &output, |fwd, _| entailment_logits(&fwd, entailment, contradiction))
-		})
-		.await?;
+	let per_class = entailment_logits(&logit_rows(model, enc, queue_wait).await?, entailment, contradiction)?;
 
 	let mut outcomes = Vec::with_capacity(texts.len());
 	for text_idx in 0..texts.len() {
@@ -75,19 +72,27 @@ pub async fn classify(model: &Arc<LoadedModel>, texts: Vec<String>, candidates: 
 	Ok(ClassOutput { outcomes, tokens: token_count })
 }
 
-/// entailment-minus-contradiction logit per pair row, from sequence-classification [B,K].
-fn entailment_logits(fwd: &Fwd<'_>, entailment: usize, contradiction: usize) -> Result<Vec<f64>> {
-	match fwd.shape.as_slice() {
-		[b, k] => {
-			if entailment >= *k || contradiction >= *k {
-				return Err(Error::Config(format!("label ids ent={entailment}/con={contradiction} outside output dim {k}")));
-			}
-			Ok((0..*b)
-				.map(|i| (row_of(fwd.data, i, *k)[entailment] - row_of(fwd.data, i, *k)[contradiction]) as f64)
-				.collect())
-		}
-		other => Err(Error::BadOutputShape(other.to_vec())),
-	}
+async fn logit_rows(model: &Arc<LoadedModel>, enc: Encoded, queue_wait: Duration) -> Result<Vec<Vec<f32>>> {
+	run_rows(model, enc, queue_wait).await?.into_iter().map(RowOut::into_logits).collect()
+}
+
+/// Batch extractor for NLI models: the raw class logits of each (premise, hypothesis) row.
+pub(crate) fn extractor(output: OutSel) -> Arc<Extract> {
+	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
+		forward(session, enc, &output, |fwd| match fwd.shape.as_slice() {
+			[_, k] => Ok(fwd.data.chunks(*k).map(|row| RowOut::Logits(row.to_vec())).collect()),
+			other => Err(Error::BadOutputShape(other.to_vec())),
+		})
+	})
+}
+
+/// entailment-minus-contradiction logit per pair row.
+fn entailment_logits(rows: &[Vec<f32>], entailment: usize, contradiction: usize) -> Result<Vec<f64>> {
+	rows.iter().map(|row| Ok((label(row, entailment)? - label(row, contradiction)?) as f64)).collect()
+}
+
+fn label(row: &[f32], id: usize) -> Result<f32> {
+	row.get(id).copied().ok_or_else(|| Error::Config(format!("label id {id} outside output dim {}", row.len())))
 }
 
 /// Auxiliary verbs that can be fronted in a yes/no question.
@@ -139,14 +144,14 @@ pub struct TrueFalseOutput {
 /// entail-vs-negation ratio: MNLI models rarely entail explicit negations, so
 /// a rival "not" hypothesis would saturate the score at 1.0.
 pub async fn classify_true_false(model: &Arc<LoadedModel>, inputs: Vec<String>, question: Option<String>, assertion: Option<String>, queue_wait: Duration) -> Result<TrueFalseOutput> {
-	let Meta::Zeroshot { entailment, contradiction, output, .. } = &model.meta else {
+	let Meta::Zeroshot { entailment, contradiction, .. } = &model.meta else {
 		return Err(Error::KindMismatch {
 			name: model.name().into(),
 			expected: "zeroshot",
 			actual: model.kind().as_str(),
 		});
 	};
-	let (entailment, contradiction, output) = (*entailment, *contradiction, output.clone());
+	let (entailment, contradiction) = (*entailment, *contradiction);
 
 	// Assertion per input: explicit, or the rephrased question.
 	let assertion = match assertion {
@@ -169,13 +174,7 @@ pub async fn classify_true_false(model: &Arc<LoadedModel>, inputs: Vec<String>, 
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
 	warn_truncated(model, enc.truncated);
 	let token_count = enc.token_count();
-	let max_batch = model.cfg.max_batch;
-	let pooled = model.pool.acquire(queue_wait).await?;
-	let probabilities = pooled
-		.run_blocking(move |session| -> Result<Vec<f64>> {
-			forward_rows(session, &enc, max_batch, &output, |fwd, _| entailment_probs(&fwd, entailment, contradiction))
-		})
-		.await?;
+	let probabilities = entailment_probs(&logit_rows(model, enc, queue_wait).await?, entailment, contradiction)?;
 	let assertions = vec![assertion; inputs.len()];
 	Ok(TrueFalseOutput { probabilities, assertions, tokens: token_count })
 }
@@ -183,26 +182,8 @@ pub async fn classify_true_false(model: &Arc<LoadedModel>, inputs: Vec<String>, 
 /// P(entailment) per row, contrasting only entailment vs contradiction (the
 /// neutral class is ignored: MNLI models put most mass there for unrelated
 /// pairs, which would swamp the entailment signal in a full-row softmax).
-fn entailment_probs(fwd: &Fwd<'_>, entailment: usize, contradiction: usize) -> Result<Vec<f64>> {
-	match fwd.shape.as_slice() {
-		[b, k] => {
-			if entailment >= *k || contradiction >= *k {
-				return Err(Error::Config(format!("label ids ent={entailment}/con={contradiction} outside output dim {k}")));
-			}
-			Ok((0..*b)
-				.map(|i| {
-					let row = row_of(fwd.data, i, *k);
-					softmax(&[row[contradiction], row[entailment]])[1]
-				})
-				.collect())
-		}
-		other => Err(Error::BadOutputShape(other.to_vec())),
-	}
-}
-
-#[inline]
-fn row_of(data: &[f32], i: usize, k: usize) -> &[f32] {
-	&data[i * k..(i + 1) * k]
+fn entailment_probs(rows: &[Vec<f32>], entailment: usize, contradiction: usize) -> Result<Vec<f64>> {
+	rows.iter().map(|row| Ok(softmax(&[label(row, contradiction)?, label(row, entailment)?])[1])).collect()
 }
 
 pub(crate) fn softmax_f64(v: &[f64]) -> Vec<f64> {

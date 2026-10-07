@@ -3,9 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 use ort::session::Session;
 
 use crate::{
-	batcher::EmbedBatcher,
+	batcher::Batcher,
 	config::{Kind, ModelConfig, Pooling, Scoring},
 	hub::Resolved,
+	pipeline::Extract,
 	pool::SessionPool,
 	tokenize::Encoder,
 };
@@ -45,8 +46,10 @@ pub struct LoadedModel {
 	pub cfg: ModelConfig,
 	pub encoder: Encoder,
 	pub pool: Arc<SessionPool>,
-	/// Present only when `batching:` is configured for this embedding model.
-	pub batcher: Option<Arc<EmbedBatcher>>,
+	/// Forward pass + post-processing for a padded batch of this model's rows.
+	pub extract: Arc<Extract>,
+	/// Cross-request batcher, unless `batching.enabled` is false.
+	pub batcher: Option<Arc<Batcher>>,
 	pub meta: Meta,
 	pub source: String,
 	pub eps: Vec<String>,

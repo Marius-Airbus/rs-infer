@@ -1,9 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
+use ort::session::Session;
+
 use crate::{
 	config::Scoring,
-	model::Meta,
-	pipeline::{blocking, forward_rows, softmax, warn_truncated, Fwd},
+	model::{Meta, OutSel},
+	pipeline::{blocking, forward, run_rows, softmax, warn_truncated, Extract, Fwd, RowOut},
+	tokenize::Encoded,
 	Error, LoadedModel, Result,
 };
 
@@ -65,31 +68,29 @@ fn best_per_doc(chunks: &[Scored], owners: &[usize], n_docs: usize) -> Vec<Score
 }
 
 pub async fn score_text_pairs(model: &Arc<LoadedModel>, pairs: Vec<(String, String)>, queue_wait: Duration) -> Result<RerankOutcome> {
-	let Meta::Rerank { scoring, yes_id, no_id, output } = &model.meta else {
+	if !matches!(model.meta, Meta::Rerank { .. }) {
 		return Err(Error::KindMismatch {
 			name: model.name().into(),
 			expected: "rerank",
 			actual: model.kind().as_str(),
 		});
-	};
-	let (scoring, yes_id, no_id, output) = (*scoring, *yes_id, *no_id, output.clone());
-
+	}
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
 	warn_truncated(model, enc.truncated);
-	let token_count = enc.token_count();
-	let max_batch = model.cfg.max_batch;
-
-	let pooled = model.pool.acquire(queue_wait).await?;
-	let scores = pooled
-		.run_blocking(move |session| -> Result<Vec<f64>> {
-			forward_rows(session, &enc, max_batch, &output, |fwd, part| apply_scoring(&fwd, scoring, yes_id, no_id, &part.attention_mask))
-		})
-		.await?;
-
+	let prompt_tokens = enc.token_count();
+	let scores = run_rows(model, enc, queue_wait).await?.into_iter().map(RowOut::into_score).collect::<Result<Vec<_>>>()?;
 	Ok(RerankOutcome {
-		scores: scores.iter().copied().enumerate().map(|(index, score)| Scored { index, score }).collect(),
-		prompt_tokens: token_count,
+		scores: scores.into_iter().enumerate().map(|(index, score)| Scored { index, score }).collect(),
+		prompt_tokens,
+	})
+}
+
+/// Batch extractor for rerank models: one relevance score per (query, document) row.
+pub(crate) fn extractor(scoring: Scoring, yes_id: Option<u32>, no_id: Option<u32>, output: OutSel) -> Arc<Extract> {
+	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
+		let scores = forward(session, enc, &output, |fwd| apply_scoring(&fwd, scoring, yes_id, no_id, &enc.attention_mask))?;
+		Ok(scores.into_iter().map(RowOut::Score).collect())
 	})
 }
 

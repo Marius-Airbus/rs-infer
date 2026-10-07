@@ -1,10 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
+	batcher::Batcher,
 	config::{Config, Kind, ModelConfig, Pooling, Scoring},
 	ep::{new_session, resolve_eps},
 	hub,
 	model::{find_label, id2label_from_config, pick_output, pooling_from_st_config, Meta},
+	pipeline::{self, Extract},
 	pool::SessionPool,
 	tokenize::Encoder,
 	Error, LoadedModel, Result,
@@ -90,21 +92,6 @@ impl Registry {
 			});
 		}
 		Ok(model.clone())
-	}
-
-	/// Spawns dynamic-batching workers for embedding models that have `batching:`
-	/// configured. Must run on the tokio runtime (models load on blocking threads).
-	pub fn start_batchers(&self) {
-		let mut n = 0;
-		for m in self.models.values() {
-			if let Some(b) = &m.batcher {
-				b.start();
-				n += 1;
-			}
-		}
-		if n > 0 {
-			tracing::info!(models = n, "dynamic embedding batching enabled");
-		}
 	}
 
 	pub fn infos(&self) -> Vec<ModelInfo> {
@@ -227,6 +214,7 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 		replicas = sessions.len(),
 		eps = %eps.join(","),
 		max_len = %cfg.max_len.map(|v| v.to_string()).unwrap_or_else(|| "unset".into()),
+		batching = cfg.batching.enabled,
 		session_build_ms = session_ms,
 		elapsed_ms = t_start.elapsed().as_millis(),
 		ram_used_mb = rss_used,
@@ -234,21 +222,18 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 		"model loaded"
 	);
 	let pool = Arc::new(SessionPool::new(sessions, max_queue));
-	// Cross-request batching is opt-in per model (`batching:`) and only for
-	// embeddings: rows are per-text and order-independent, unlike pair/token
-	// classification outputs.
-	let batcher = match (&meta, cfg.batching.as_ref()) {
-		(Meta::Embedding { pooling, output, normalize, dimensions }, Some(settings)) => Some(crate::batcher::EmbedBatcher::new(
-			pool.clone(),
-			crate::batcher::EmbedMeta { pooling: *pooling, output: output.clone(), normalize: *normalize, dimensions: *dimensions },
-			*settings,
-		)),
-		_ => None,
+	let extract: Arc<Extract> = match &meta {
+		Meta::Embedding { pooling, output, normalize, dimensions } => pipeline::embedding::extractor(*pooling, output.clone(), *normalize, *dimensions),
+		Meta::Rerank { scoring, yes_id, no_id, output } => pipeline::rerank::extractor(*scoring, *yes_id, *no_id, output.clone()),
+		Meta::Zeroshot { output, .. } => pipeline::zeroshot::extractor(output.clone()),
+		Meta::Pii { id2label, output } => pipeline::pii::extractor(id2label.len(), output.clone()),
 	};
+	let batcher = cfg.batching.enabled.then(|| Batcher::new(pool.clone(), extract.clone(), cfg.batching));
 	Ok(Arc::new(LoadedModel {
 		cfg: cfg.clone(),
 		encoder,
 		pool,
+		extract,
 		batcher,
 		meta,
 		source: resolved.source,
