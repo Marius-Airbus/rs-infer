@@ -92,17 +92,48 @@ impl EmbedBatcher {
 	/// Submits token rows (one per text, unpadded) and awaits one vector per row,
 	/// in order. Fails with Saturated when the queue is full.
 	pub(crate) async fn submit(&self, rows: Vec<Vec<u32>>, timeout: Duration) -> Result<Vec<Vec<f32>>> {
-		let mut rxs = Vec::with_capacity(rows.len());
-		for ids in rows {
-			let (reply_tx, reply_rx) = oneshot::channel();
-			self.queue_tx.try_send(Unit { ids, timeout, reply: reply_tx }).map_err(|_| Error::Saturated)?;
-			rxs.push(reply_rx);
-		}
+		let rxs = self.enqueue(rows, timeout)?;
 		let mut out = Vec::with_capacity(rxs.len());
 		for reply in rxs {
 			out.push(await_reply(reply).await?);
 		}
 		Ok(out)
+	}
+
+	/// Queues all rows of one request or none of them: a request that only half
+	/// fits would burn forwards on rows whose caller already got a 429.
+	fn enqueue(&self, rows: Vec<Vec<u32>>, timeout: Duration) -> Result<Vec<oneshot::Receiver<Result<Vec<f32>>>>> {
+		if rows.is_empty() {
+			return Ok(Vec::new());
+		}
+		let capacity = self.queue_tx.max_capacity();
+		if rows.len() > capacity {
+			return Err(Error::BadRequest(format!(
+				"request has {} inputs but the batching queue holds at most {capacity} (batching.queue_rows)",
+				rows.len()
+			)));
+		}
+		let permits = self.queue_tx.try_reserve_many(rows.len()).map_err(|_| Error::Saturated)?;
+		Ok(permits
+			.zip(rows)
+			.map(|(permit, ids)| {
+				let (reply_tx, reply_rx) = oneshot::channel();
+				permit.send(Unit { ids, timeout, reply: reply_tx });
+				reply_rx
+			})
+			.collect())
+	}
+}
+
+/// Same error for every caller of a failed batch: `Error` is not `Clone`, but the
+/// kinds that map to distinct HTTP statuses (429/503/4xx) must survive the fan-out.
+fn share(e: &Error) -> Error {
+	match e {
+		Error::Saturated => Error::Saturated,
+		Error::PoolTimeout => Error::PoolTimeout,
+		Error::BadRequest(m) => Error::BadRequest(m.clone()),
+		Error::BadOutputShape(s) => Error::BadOutputShape(s.clone()),
+		other => Error::Ort(ort::Error::new(other.to_string())),
 	}
 }
 
@@ -212,10 +243,13 @@ async fn run_batch(batcher: &Arc<EmbedBatcher>, units: Vec<Unit>) {
 			}
 		}
 		Err(e) => {
-			let msg = e.to_string();
 			for sender in senders {
-				let _ = sender.send(Err(Error::Ort(ort::Error::new(msg.clone()))));
+				let _ = sender.send(Err(share(&e)));
 			}
 		}
 	}
 }
+
+#[cfg(test)]
+#[path = "tests/batcher_tests.rs"]
+mod tests;
