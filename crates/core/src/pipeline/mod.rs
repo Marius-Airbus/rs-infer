@@ -11,7 +11,7 @@ use ort::session::{OutputSelector, RunOptions, Session, SessionOutputs};
 
 use crate::{
 	model::OutSel,
-	tokenize::{make_inputs, Encoded},
+	tokenize::{make_inputs, Encoded, Row},
 	LoadedModel,
 };
 
@@ -74,23 +74,38 @@ pub type Extract = dyn Fn(&mut Session, &Encoded) -> crate::Result<Vec<RowOut>> 
 
 /// Runs `enc`'s rows through `model`, one output per row in input order: via the
 /// cross-request batcher when the model has one and the request fits its queue,
-/// else directly on one session in `max_batch`-row slices.
+/// else directly on one session (see [`run_sorted`]).
 pub(crate) async fn run_rows(model: &Arc<LoadedModel>, enc: Encoded, queue_wait: Duration) -> crate::Result<Vec<RowOut>> {
 	if let Some(batcher) = model.batcher.as_ref().filter(|b| enc.batch <= b.capacity()) {
 		return batcher.submit(enc.into_rows(), queue_wait).await;
 	}
 	let extract = Arc::clone(&model.extract);
-	let max_rows = model.cfg.max_batch;
+	let (max_rows, max_tokens) = (model.cfg.max_batch, model.cfg.batching.max_tokens);
 	let pooled = model.pool.acquire(queue_wait).await?;
-	pooled
-		.run_blocking(move |session| {
-			let mut out = Vec::with_capacity(enc.batch);
-			for part in enc.split(max_rows) {
-				out.extend(extract(session, &part)?);
-			}
-			Ok(out)
-		})
-		.await
+	pooled.run_blocking(move |session| run_sorted(enc.into_rows(), max_rows, max_tokens, |batch| extract(session, batch))).await
+}
+
+/// Runs `rows` shortest first, in batches of at most `max_rows` rows and
+/// `max_tokens` padded tokens (the batcher's rule), so each batch pads to rows of
+/// similar length; returns the outputs in the original row order.
+fn run_sorted(rows: Vec<Row>, max_rows: usize, max_tokens: usize, mut run: impl FnMut(&Encoded) -> crate::Result<Vec<RowOut>>) -> crate::Result<Vec<RowOut>> {
+	let mut order: Vec<usize> = (0..rows.len()).collect();
+	order.sort_by_key(|&i| rows[i].ids.len());
+	let lens: Vec<usize> = order.iter().map(|&i| rows[i].ids.len()).collect();
+	let mut outputs: Vec<Option<RowOut>> = vec![None; rows.len()];
+	let mut start = 0;
+	for size in crate::batcher::batch_sizes(&lens, max_rows.max(1), max_tokens) {
+		let idx = &order[start..start + size];
+		let batch: Vec<Row> = idx.iter().map(|&i| rows[i].clone()).collect();
+		for (&i, out) in idx.iter().zip(run(&Encoded::from_rows(&batch))?) {
+			outputs[i] = Some(out);
+		}
+		start += size;
+	}
+	outputs
+		.into_iter()
+		.map(|o| o.ok_or_else(|| crate::Error::Ort(ort::Error::new("a batch returned fewer outputs than rows"))))
+		.collect()
 }
 
 /// Builds `enc`'s inputs, runs the model and hands the selected output to `f`.
@@ -146,3 +161,7 @@ pub(crate) fn softmax(logits: &[f32]) -> Vec<f64> {
 	let sum: f32 = exps.iter().sum();
 	exps.iter().map(|e| (e / sum) as f64).collect()
 }
+
+#[cfg(test)]
+#[path = "../tests/pipeline/run_tests.rs"]
+mod tests;

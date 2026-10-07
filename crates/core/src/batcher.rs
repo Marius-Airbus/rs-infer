@@ -146,7 +146,7 @@ async fn await_reply(reply: oneshot::Receiver<Result<RowOut>>) -> Result<RowOut>
 /// A batch closes at `share` rows, or before a row that would push its padded
 /// size (rows x longest row, i.e. that row) past `max_tokens`; a single row
 /// always forms a batch.
-fn batch_sizes(sorted_lens: &[usize], share: usize, max_tokens: usize) -> Vec<usize> {
+pub(crate) fn batch_sizes(sorted_lens: &[usize], share: usize, max_tokens: usize) -> Vec<usize> {
 	let mut sizes = Vec::new();
 	let mut cur = 0usize;
 	for &len in sorted_lens {
