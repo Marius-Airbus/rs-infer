@@ -11,7 +11,6 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use rsinfer_core::Registry;
 use tokio::net::TcpListener;
-use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 use crate::state::AppState;
 
@@ -174,12 +173,11 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 	);
 
 	let state = AppState::new(registry, config.clone());
-	let app = api::router(state)
-		.layer(TimeoutLayer::with_status_code(
-			axum::http::StatusCode::REQUEST_TIMEOUT,
-			std::time::Duration::from_millis(config.server.request_timeout_ms),
-		))
-		.layer(RequestBodyLimitLayer::new(config.server.max_body_mb * 1024 * 1024));
+	let app = api::router(
+		state,
+		std::time::Duration::from_millis(config.server.request_timeout_ms),
+		config.server.max_body_mb * 1024 * 1024,
+	);
 
 	let listener = TcpListener::bind(&config.server.bind).await.with_context(|| format!("cannot bind {}", config.server.bind))?;
 	let addr = listener.local_addr()?;

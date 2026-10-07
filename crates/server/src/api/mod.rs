@@ -3,21 +3,24 @@ mod embeddings;
 mod pii;
 mod rerank;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
 	body::Body,
 	extract::{MatchedPath, Request, State},
+	http::StatusCode,
 	middleware::{self, Next},
 	response::{IntoResponse, Response},
 	routing::{get, post},
 	Json, Router,
 };
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
-use crate::state::AppState;
+use crate::{metrics::Metrics, state::AppState};
 
-pub fn router(state: AppState) -> Router {
-	Router::new()
+pub fn router(state: AppState, request_timeout: Duration, max_body_bytes: usize) -> Router {
+	let metrics = state.metrics.clone();
+	let routes = Router::new()
 		.route("/health", get(health).post(health))
 		.route("/v1/models", get(list_models))
 		.route("/v1/embeddings", post(embeddings::embeddings))
@@ -34,8 +37,17 @@ pub fn router(state: AppState) -> Router {
 		.route("/pii/redact", post(pii::pii_redact_h))
 		.route("/v1/pii/redact", post(pii::pii_redact_h))
 		.route("/metrics", get(metrics_h))
-		.layer(middleware::from_fn_with_state(state.clone(), track))
-		.with_state(state)
+		.with_state(state);
+	with_middleware(routes, metrics, request_timeout, max_body_bytes)
+}
+
+/// `track` is the outermost layer so requests cut short by the timeout (408) or
+/// the body limit (413) are still logged and counted in /metrics.
+fn with_middleware(routes: Router, metrics: Metrics, request_timeout: Duration, max_body_bytes: usize) -> Router {
+	routes
+		.layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout))
+		.layer(RequestBodyLimitLayer::new(max_body_bytes))
+		.layer(middleware::from_fn_with_state(metrics, track))
 }
 
 /// Shared usage object: our pipelines only consume prompt tokens.
@@ -43,7 +55,7 @@ pub(crate) fn usage(tokens: usize) -> crate::dto::Usage {
 	crate::dto::Usage { prompt_tokens: tokens, total_tokens: tokens }
 }
 
-async fn track(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
+async fn track(State(metrics): State<Metrics>, req: Request<Body>, next: Next) -> Response {
 	let start = Instant::now();
 	let method = req.method().clone();
 	let route = req
@@ -54,7 +66,7 @@ async fn track(State(state): State<AppState>, req: Request<Body>, next: Next) ->
 	let res = next.run(req).await;
 	let status = res.status().as_u16();
 	let elapsed = start.elapsed();
-	state.metrics.observe(&route, status, elapsed);
+	metrics.observe(&route, status, elapsed);
 	tracing::info!(
 		method = %method,
 		route = %route,
@@ -103,3 +115,7 @@ async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
 async fn metrics_h(State(state): State<AppState>) -> impl IntoResponse {
 	([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], state.metrics.encode())
 }
+
+#[cfg(test)]
+#[path = "../tests/api_tests.rs"]
+mod tests;
