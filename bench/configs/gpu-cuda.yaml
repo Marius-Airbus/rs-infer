@@ -1,0 +1,20 @@
+# GPU benchmark config, CUDA provider (build: make gpu-cuda).
+# dtype auto -> the published fp16 graph; pooling in the graph on (accelerator).
+# To isolate one change, override per model: `dtype: fp32`, `pooling_in_graph: false`.
+server: { bind: 0.0.0.0:8080, max_queue: 4096 }
+models:
+  - name: e5-small
+    kind: embedding
+    hf: Xenova/multilingual-e5-small
+    max_len: 512
+    replicas: 1
+    eps: [cuda, cpu]
+    batching: { max_rows: 64, max_tokens: 32768 }   # GPUs take bigger batches than the CPU default
+
+  - name: ms-marco
+    kind: rerank
+    hf: Xenova/ms-marco-MiniLM-L-6-v2
+    max_len: 512
+    replicas: 1
+    eps: [cuda, cpu]
+    batching: { max_rows: 64, max_tokens: 32768 }

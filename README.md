@@ -116,6 +116,8 @@ make lint        # clippy
 RUST_LOG=debug   # verbose EP/session/file logs; INFO shows startup + request summaries
 ```
 
+Load tests and the GPU test protocol: [`bench/`](bench/README.md) (`bench/run.sh`, `bench/compare.py`).
+
 Architecture: `crates/core` (engine: `ep`, `hub`, `tokenize`, `pool`, `registry`,
 `pipeline/*`) and `crates/server` (the HTTP binary). Python helpers for model
 export and load-testing live in [`python/`](python/README.md).

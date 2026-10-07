@@ -1,0 +1,12 @@
+# Quality reference for bench/compare.py: same models, CPU, published fp32 graphs,
+# pooling done by the server. Run it next to the GPU server on another port, e.g.
+#   rsinfer-server --config bench/configs/cpu-reference.yaml  (bind 8081)
+server: { bind: 0.0.0.0:8081 }
+models:
+  - name: e5-small
+    kind: embedding
+    hf: Xenova/multilingual-e5-small
+    max_len: 512
+    replicas: 1
+    eps: [cpu]
+    dtype: fp32
