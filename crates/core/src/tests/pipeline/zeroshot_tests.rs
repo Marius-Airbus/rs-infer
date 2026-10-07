@@ -27,3 +27,9 @@ fn inverts_yesno_questions() {
 	assert_eq!(invert_question("What is the weather?"), None); // not a yes/no question
 	assert_eq!(invert_question("Is important?"), None); // too short
 }
+
+#[test]
+fn inverts_questions_with_non_ascii_subject() {
+	assert_eq!(invert_question("Is élan vital important?").as_deref(), Some("Élan vital is important."));
+	assert_eq!(invert_question("Is Émile here?").as_deref(), Some("Émile is here."));
+}

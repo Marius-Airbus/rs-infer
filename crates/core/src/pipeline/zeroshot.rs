@@ -117,8 +117,10 @@ pub fn invert_question(q: &str) -> Option<String> {
 	}
 	let (subj, pred) = rest.split_at(subj_len);
 	let mut s = subj.join(" ");
-	let first = s[..1].to_uppercase();
-	s.replace_range(..1, &first);
+	// Byte length of the first char: slicing at 1 panics on non-ASCII (e.g. "élan").
+	let first_len = s.chars().next().map_or(0, char::len_utf8);
+	let first = s[..first_len].to_uppercase();
+	s.replace_range(..first_len, &first);
 	Some(format!("{s} {aux} {}.", pred.join(" ")))
 }
 
