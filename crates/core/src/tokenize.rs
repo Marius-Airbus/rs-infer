@@ -59,7 +59,9 @@ pub struct Encoder {
 }
 
 impl Encoder {
-	pub fn new(path: &std::path::Path, max_len: Option<usize>) -> Result<Self> {
+	/// `stride`: tokens shared by consecutive windows when a text overflows
+	/// `max_len` (used by [`Encoder::encode_texts_windows`]; 0 elsewhere).
+	pub fn new(path: &std::path::Path, max_len: Option<usize>, stride: usize) -> Result<Self> {
 		// tokenizers' encode_batch fans out on rayon by default; that pool then
 		// oversubscribes against ORT's intra-op threads. Serialize it unless the
 		// operator explicitly configured TOKENIZERS_PARALLELISM.
@@ -75,7 +77,7 @@ impl Encoder {
 			tokenizer
 				.with_truncation(Some(TruncationParams {
 					max_length: max,
-					stride: 0,
+					stride,
 					direction: TruncationDirection::Right,
 					..Default::default()
 				}))
@@ -91,21 +93,30 @@ impl Encoder {
 	}
 
 	fn from_encodings(encodings: Vec<Encoding>, with_offsets: bool) -> Encoded {
+		// Rows are normally batch-padded already; overflow windows may not be, so
+		// right-pad everything to the longest row.
+		let seq = encodings.iter().map(|x| x.len()).max().unwrap_or(0);
+		let pad = |mut v: Vec<i64>| {
+			v.resize(seq, 0);
+			v
+		};
 		let mut e = Encoded {
 			input_ids: Vec::with_capacity(encodings.len()),
 			attention_mask: Vec::with_capacity(encodings.len()),
 			token_type_ids: Vec::with_capacity(encodings.len()),
 			offsets: Vec::new(),
 			batch: encodings.len(),
-			seq: encodings.first().map(|x| x.len()).unwrap_or(0),
+			seq,
 			truncated: encodings.iter().filter(|x| !x.get_overflowing().is_empty()).count(),
 		};
 		for enc in &encodings {
-			e.input_ids.push(enc.get_ids().iter().map(|&i| i as i64).collect());
-			e.attention_mask.push(enc.get_attention_mask().iter().map(|&m| m as i64).collect());
-			e.token_type_ids.push(enc.get_type_ids().iter().map(|&t| t as i64).collect());
+			e.input_ids.push(pad(enc.get_ids().iter().map(|&i| i as i64).collect()));
+			e.attention_mask.push(pad(enc.get_attention_mask().iter().map(|&m| m as i64).collect()));
+			e.token_type_ids.push(pad(enc.get_type_ids().iter().map(|&t| t as i64).collect()));
 			if with_offsets {
-				e.offsets.push(enc.get_offsets().to_vec());
+				let mut offsets = enc.get_offsets().to_vec();
+				offsets.resize(seq, (0, 0));
+				e.offsets.push(offsets);
 			}
 		}
 		e
@@ -148,6 +159,29 @@ impl Encoder {
 			.encode_batch_char_offsets(inputs, true)
 			.map_err(|e| Error::Tokenize(e.to_string()))?;
 		Ok(Self::from_encodings(encodings, true))
+	}
+
+	/// Like [`Encoder::encode_texts_offsets`], but a text longer than `max_len`
+	/// yields one row per overlapping window (the tokenizer's overflow, `stride`
+	/// tokens shared) instead of being cut. Also returns each row's text index.
+	pub fn encode_texts_windows(&self, texts: &[String]) -> Result<(Encoded, Vec<usize>)> {
+		let inputs: Vec<EncodeInput<'_>> = texts.iter().map(|t| EncodeInput::from(Cow::Borrowed(t.as_str()))).collect();
+		let encodings = self
+			.tokenizer
+			.encode_batch_char_offsets(inputs, true)
+			.map_err(|e| Error::Tokenize(e.to_string()))?;
+		let mut rows = Vec::with_capacity(encodings.len());
+		let mut owners = Vec::with_capacity(encodings.len());
+		for (i, mut enc) in encodings.into_iter().enumerate() {
+			let overflow = enc.take_overflowing();
+			rows.push(enc);
+			owners.push(i);
+			for window in overflow {
+				rows.push(window);
+				owners.push(i);
+			}
+		}
+		Ok((Self::from_encodings(rows, true), owners))
 	}
 
 	pub fn encode_pairs(&self, pairs: &[(String, String)]) -> Result<Encoded> {

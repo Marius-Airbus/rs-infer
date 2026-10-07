@@ -38,8 +38,10 @@ pub async fn detect(model: &Arc<LoadedModel>, texts: Vec<String>, threshold: Opt
 	let (id2label, output) = (id2label.clone(), output.clone());
 	let threshold = threshold.unwrap_or(model.cfg.threshold).clamp(0.0, 1.0);
 
+	// Texts longer than max_len come back as several overlapping windows (rows),
+	// so nothing past the first max_len tokens escapes detection.
 	let m = Arc::clone(model);
-	let (enc, texts) = blocking(move || m.encoder.encode_texts_offsets(&texts).map(|enc| (enc, texts))).await??;
+	let (enc, owners, texts) = blocking(move || m.encoder.encode_texts_windows(&texts).map(|(enc, owners)| (enc, owners, texts))).await??;
 	let token_count = enc.token_count();
 	let offsets = enc.offsets.clone();
 	let pooled = model.pool.acquire(queue_wait).await?;
@@ -50,11 +52,42 @@ pub async fn detect(model: &Arc<LoadedModel>, texts: Vec<String>, threshold: Opt
 			forward_rows(session, &enc, max_batch, &output, |fwd, _| argmax_probs(&fwd, n_labels))
 		})
 		.await?;
-	let mut results = Vec::with_capacity(texts.len());
-	for (row, (text, token_offsets)) in per_token.iter().zip(texts.iter().zip(offsets.iter())) {
-		results.push(decode_entities(text, row, token_offsets, &id2label, threshold));
+	let mut windows: Vec<Vec<Window>> = vec![Vec::new(); texts.len()];
+	for ((row, row_offsets), owner) in per_token.into_iter().zip(offsets).zip(owners) {
+		// Content tokens only: special and pad tokens have empty (0,0) offsets.
+		windows[owner].push(row.into_iter().zip(row_offsets).filter(|(_, (s, e))| e > s).unzip());
 	}
+	let results = texts
+		.iter()
+		.zip(windows)
+		.map(|(text, text_windows)| {
+			let (preds, token_offsets) = stitch_windows(text_windows);
+			decode_entities(text, &preds, &token_offsets, &id2label, threshold)
+		})
+		.collect();
 	Ok(DetectOutput { entities: results, tokens: token_count })
+}
+
+/// One window's content tokens: (label id, probability) and char offsets.
+type Window = (Vec<(usize, f64)>, Vec<(usize, usize)>);
+
+/// Joins one text's overlapping windows (in order) into a single token sequence.
+/// A token in an overlap is taken from the window where it sits farther from the
+/// edge, i.e. with context on both sides: the first half of the overlap from the
+/// earlier window, the second half from the later one.
+fn stitch_windows(windows: Vec<Window>) -> Window {
+	let (mut preds, mut offsets): Window = (Vec::new(), Vec::new());
+	for (w_preds, w_offsets) in windows {
+		let covered = offsets.last().map_or(0, |o| o.1);
+		let overlap = w_offsets.iter().take_while(|o| o.0 < covered).count().min(preds.len());
+		let from_earlier = overlap / 2;
+		let keep = preds.len() - (overlap - from_earlier);
+		preds.truncate(keep);
+		offsets.truncate(keep);
+		preds.extend_from_slice(&w_preds[from_earlier..]);
+		offsets.extend_from_slice(&w_offsets[from_earlier..]);
+	}
+	(preds, offsets)
 }
 
 /// Per token: (predicted label id, softmax probability of that label).

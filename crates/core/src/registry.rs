@@ -144,7 +144,13 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 		elapsed_ms = t_start.elapsed().as_millis(),
 		"model files resolved (incl. download if not cached)"
 	);
-	let encoder = Encoder::new(&resolved.tokenizer, cfg.max_len)?;
+	// PII scans long texts in windows overlapping by a quarter of max_len (context
+	// for tokens near a window edge); other kinds just truncate.
+	let stride = match (cfg.kind, cfg.max_len) {
+		(Kind::Pii, Some(max)) if max >= 16 => max / 4,
+		_ => 0,
+	};
+	let encoder = Encoder::new(&resolved.tokenizer, cfg.max_len, stride)?;
 
 	let (eps, _) = resolve_eps(cfg);
 	let t_sessions = std::time::Instant::now();

@@ -1,6 +1,42 @@
 //! Unit tests for [`pii`](super).
 
 use super::*;
+use crate::{test_fixtures::word_tokenizer, tokenize::Encoder};
+
+#[test]
+fn long_text_windows_stitch_back_to_every_token_once() {
+	// max_len 8 = 6 words + [CLS]/[SEP] per window, 2 words of overlap.
+	let enc = Encoder::new(&word_tokenizer(), Some(8), 2).unwrap();
+	let text = (0..20).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+	let (encoded, owners) = enc.encode_texts_windows(std::slice::from_ref(&text)).unwrap();
+	assert!(owners.len() > 1 && owners.iter().all(|&o| o == 0), "{owners:?}");
+	let windows = encoded
+		.offsets
+		.iter()
+		.map(|offs| {
+			let offs: Vec<(usize, usize)> = offs.iter().copied().filter(|(s, e)| e > s).collect();
+			(vec![(0, 1.0); offs.len()], offs)
+		})
+		.collect();
+	let (_, offsets) = stitch_windows(windows);
+	let words: Vec<&str> = offsets.iter().map(|&(s, e)| &text[s..e]).collect();
+	assert_eq!(words, text.split(' ').collect::<Vec<_>>());
+}
+
+#[test]
+fn entity_across_window_boundary_is_found_once() {
+	let text = "a b c d e f g h";
+	let offs = |r: std::ops::Range<usize>| r.map(|i| (2 * i, 2 * i + 1)).collect::<Vec<_>>();
+	// Window 0 sees a..f, window 1 (2-token overlap) sees e..h; only window 1 has
+	// the right-hand context to tag "f g" as a person.
+	let w0 = (vec![(0, 0.9); 6], offs(0..6));
+	let w1 = (vec![(0, 0.9), (1, 0.9), (2, 0.9), (0, 0.9)], offs(4..8));
+	let (preds, offsets) = stitch_windows(vec![w0, w1]);
+	assert_eq!(offsets, offs(0..8));
+	let ents = decode_entities(text, &preds, &offsets, &labels(), 0.5);
+	assert_eq!(ents.len(), 1, "{ents:?}");
+	assert_eq!((ents[0].entity_type.as_str(), ents[0].text.as_str(), ents[0].start, ents[0].end), ("person", "f g", 10, 13));
+}
 
 fn labels() -> Vec<String> {
 	vec![

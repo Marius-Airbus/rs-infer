@@ -27,7 +27,7 @@ fn strings(v: &[&str]) -> Vec<String> {
 
 #[test]
 fn counts_truncated_inputs() {
-	let enc = Encoder::new(&word_tokenizer(), Some(6)).unwrap();
+	let enc = Encoder::new(&word_tokenizer(), Some(6), 0).unwrap();
 	// 3 words + [CLS]/[SEP] fit in 6 tokens; 8 words do not.
 	let texts = strings(&["a b c", "a b c d e f g h"]);
 	assert_eq!(enc.encode_texts(&texts).unwrap().truncated, 1);
