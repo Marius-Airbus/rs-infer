@@ -57,6 +57,8 @@ pub async fn run(args: ProfileArgs) -> anyhow::Result<()> {
 	}
 	// Profiling is per-session; always measure one replica so every run hits the profiled session.
 	cfg.replicas = 1;
+	// Measure one forward of `--batch` rows, not `max_batch`-sized slices.
+	cfg.max_batch = args.batch;
 	cfg.profiling_prefix = args.profile_out.clone();
 
 	let cache = config.server.hf_cache_dir.clone();

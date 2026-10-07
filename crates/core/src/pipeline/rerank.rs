@@ -3,8 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
 	config::Scoring,
 	model::Meta,
-	pipeline::{blocking, run_forward, softmax, Fwd},
-	tokenize::make_inputs,
+	pipeline::{blocking, forward_rows, softmax, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -38,13 +37,12 @@ pub async fn score_text_pairs(model: &Arc<LoadedModel>, pairs: Vec<(String, Stri
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
 	let token_count = enc.token_count();
-	let attn = enc.attention_mask.clone();
+	let max_batch = model.cfg.max_batch;
 
 	let pooled = model.pool.acquire(queue_wait).await?;
 	let scores = pooled
 		.run_blocking(move |session| -> Result<Vec<f64>> {
-			let inputs = make_inputs(session, &enc)?;
-			run_forward(session, inputs, &output, |fwd| apply_scoring(&fwd, scoring, yes_id, no_id, &attn))
+			forward_rows(session, &enc, max_batch, &output, |fwd, part| apply_scoring(&fwd, scoring, yes_id, no_id, &part.attention_mask))
 		})
 		.await?;
 

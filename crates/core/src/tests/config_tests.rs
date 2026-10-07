@@ -69,6 +69,23 @@ models:
 }
 
 #[test]
+fn max_batch_defaults_and_validates() {
+	let yaml_src = r#"
+models:
+  - name: x
+    kind: embedding
+    path: models/x
+  - name: y
+    kind: rerank
+    path: models/y
+    max_batch: 0
+"#;
+	let cfg: Config = serde_norway::from_str(yaml_src).unwrap();
+	assert_eq!(cfg.models[0].max_batch, 32);
+	assert!(cfg.models[1].validate().is_err());
+}
+
+#[test]
 fn rejects_unknown_field() {
 	let yaml_src = r#"
 models:

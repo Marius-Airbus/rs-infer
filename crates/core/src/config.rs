@@ -215,6 +215,10 @@ pub struct ModelConfig {
 	/// Cross-request dynamic batching for embedding models (opt-in). Absent = per-request forwards.
 	#[serde(default)]
 	pub batching: Option<Batching>,
+	/// Max rows per forward pass; a bigger request runs as successive slices, so
+	/// one request cannot blow up activation memory.
+	#[serde(default = "default_max_batch")]
+	pub max_batch: usize,
 
 	// --- embedding ---
 	#[serde(default)]
@@ -267,6 +271,9 @@ fn default_revision() -> String {
 fn default_replicas() -> usize {
 	2
 }
+fn default_max_batch() -> usize {
+	32
+}
 fn default_true() -> bool {
 	true
 }
@@ -301,6 +308,7 @@ impl Default for ModelConfig {
 			eps: vec![],
 			default: false,
 			batching: None,
+			max_batch: default_max_batch(),
 			pooling: Pooling::Auto,
 			normalize: true,
 			dimensions: None,
@@ -345,6 +353,9 @@ impl ModelConfig {
 		}
 		if self.replicas == 0 {
 			return Err(crate::Error::Config(format!("model '{}': replicas must be >= 1", self.name)));
+		}
+		if self.max_batch == 0 {
+			return Err(crate::Error::Config(format!("model '{}': max_batch must be >= 1", self.name)));
 		}
 		Ok(())
 	}

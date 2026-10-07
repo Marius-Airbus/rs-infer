@@ -2,8 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
 	model::Meta,
-	pipeline::{blocking, run_forward, softmax, Fwd},
-	tokenize::make_inputs,
+	pipeline::{blocking, forward_rows, softmax, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -49,11 +48,11 @@ pub async fn classify(model: &Arc<LoadedModel>, texts: Vec<String>, candidates: 
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
 	let token_count = enc.token_count();
+	let max_batch = model.cfg.max_batch;
 	let pooled = model.pool.acquire(queue_wait).await?;
 	let per_class = pooled
 		.run_blocking(move |session| -> Result<Vec<f64>> {
-			let inputs = make_inputs(session, &enc)?;
-			run_forward(session, inputs, &output, |fwd| entailment_logits(&fwd, entailment, contradiction))
+			forward_rows(session, &enc, max_batch, &output, |fwd, _| entailment_logits(&fwd, entailment, contradiction))
 		})
 		.await?;
 
@@ -168,11 +167,11 @@ pub async fn classify_true_false(model: &Arc<LoadedModel>, inputs: Vec<String>, 
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_pairs(&pairs)).await??;
 	let token_count = enc.token_count();
+	let max_batch = model.cfg.max_batch;
 	let pooled = model.pool.acquire(queue_wait).await?;
 	let probabilities = pooled
 		.run_blocking(move |session| -> Result<Vec<f64>> {
-			let inputs = make_inputs(session, &enc)?;
-			run_forward(session, inputs, &output, |fwd| entailment_probs(&fwd, entailment, contradiction))
+			forward_rows(session, &enc, max_batch, &output, |fwd, _| entailment_probs(&fwd, entailment, contradiction))
 		})
 		.await?;
 	let assertions = vec![assertion; inputs.len()];

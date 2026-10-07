@@ -3,8 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
 	config::Pooling,
 	model::Meta,
-	pipeline::{blocking, run_forward, Fwd},
-	tokenize::make_inputs,
+	pipeline::{blocking, forward_rows, run_forward, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -37,13 +36,12 @@ pub async fn embed(model: &Arc<LoadedModel>, texts: Vec<String>, queue_wait: Dur
 	let m = Arc::clone(model);
 	let enc = blocking(move || m.encoder.encode_texts(&texts)).await??;
 	let token_count = enc.token_count();
-	let attn = enc.attention_mask.clone();
+	let max_batch = model.cfg.max_batch;
 
 	let pooled = model.pool.acquire(queue_wait).await?;
 	let vectors = pooled
 		.run_blocking(move |session| -> Result<Vec<Vec<f32>>> {
-			let inputs = make_inputs(session, &enc)?;
-			run_forward(session, inputs, &output, |fwd| pool_rows(&fwd, pooling, &attn))
+			forward_rows(session, &enc, max_batch, &output, |fwd, part| pool_rows(&fwd, pooling, &part.attention_mask))
 		})
 		.await?;
 
@@ -84,12 +82,17 @@ pub async fn embed_tokens(model: &Arc<LoadedModel>, rows: Vec<Vec<u32>>, queue_w
 		return Ok(EmbedOutput { vectors, tokens });
 	}
 
+	let max_batch = model.cfg.max_batch.max(1);
 	let pooled = model.pool.acquire(queue_wait).await?;
 	let vectors = pooled
 		.run_blocking(move |session| -> Result<Vec<Vec<f32>>> {
-			let inputs = crate::tokenize::make_token_inputs(session, &rows)?;
-			let attn: Vec<Vec<i64>> = rows.iter().map(|r| r.iter().map(|_| 1i64).collect()).collect();
-			run_forward(session, inputs, &output, |fwd| pool_rows(&fwd, pooling, &attn))
+			let mut out = Vec::with_capacity(rows.len());
+			for chunk in rows.chunks(max_batch) {
+				let inputs = crate::tokenize::make_token_inputs(session, chunk)?;
+				let attn: Vec<Vec<i64>> = chunk.iter().map(|r| vec![1i64; r.len()]).collect();
+				out.extend(run_forward(session, inputs, &output, |fwd| pool_rows(&fwd, pooling, &attn))?);
+			}
+			Ok(out)
 		})
 		.await?;
 

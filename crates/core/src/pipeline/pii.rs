@@ -4,8 +4,7 @@ use serde::Serialize;
 
 use crate::{
 	model::Meta,
-	pipeline::{blocking, run_forward, Fwd},
-	tokenize::make_inputs,
+	pipeline::{blocking, forward_rows, Fwd},
 	Error, LoadedModel, Result,
 };
 
@@ -45,10 +44,10 @@ pub async fn detect(model: &Arc<LoadedModel>, texts: Vec<String>, threshold: Opt
 	let offsets = enc.offsets.clone();
 	let pooled = model.pool.acquire(queue_wait).await?;
 	let n_labels = id2label.len();
+	let max_batch = model.cfg.max_batch;
 	let per_token = pooled
 		.run_blocking(move |session| -> Result<Vec<Vec<(usize, f64)>>> {
-			let inputs = make_inputs(session, &enc)?;
-			run_forward(session, inputs, &output, |fwd| argmax_probs(&fwd, n_labels))
+			forward_rows(session, &enc, max_batch, &output, |fwd, _| argmax_probs(&fwd, n_labels))
 		})
 		.await?;
 	let mut results = Vec::with_capacity(texts.len());

@@ -24,6 +24,30 @@ impl Encoded {
 	pub fn token_count(&self) -> usize {
 		self.attention_mask.iter().map(|r| r.iter().map(|&m| m as usize).sum::<usize>()).sum()
 	}
+
+	/// Splits into batches of at most `max_rows` rows, each trimmed to its own
+	/// longest row (padding is on the right).
+	pub fn split(&self, max_rows: usize) -> Vec<Encoded> {
+		let max_rows = max_rows.max(1);
+		(0..self.batch)
+			.step_by(max_rows)
+			.map(|start| {
+				let end = (start + max_rows).min(self.batch);
+				let seq = self.attention_mask[start..end].iter().map(|m| m.iter().filter(|&&v| v != 0).count()).max().unwrap_or(0);
+				fn cut<T: Clone>(rows: &[Vec<T>], seq: usize) -> Vec<Vec<T>> {
+					rows.iter().map(|r| r[..seq.min(r.len())].to_vec()).collect()
+				}
+				Encoded {
+					input_ids: cut(&self.input_ids[start..end], seq),
+					attention_mask: cut(&self.attention_mask[start..end], seq),
+					token_type_ids: cut(&self.token_type_ids[start..end], seq),
+					offsets: self.offsets.get(start..end).map(|o| cut(o, seq)).unwrap_or_default(),
+					batch: end - start,
+					seq,
+				}
+			})
+			.collect()
+	}
 }
 
 pub struct Encoder {
@@ -271,3 +295,7 @@ fn empty_kv_cache(input: &Outlet, batch: usize) -> Result<SessionInputValue<'sta
 		None => Err(Error::Ort(ort::Error::new(format!("input '{}' has no element type", input.name())))),
 	}
 }
+
+#[cfg(test)]
+#[path = "tests/tokenize_tests.rs"]
+mod tests;

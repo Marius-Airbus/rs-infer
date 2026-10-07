@@ -7,7 +7,10 @@ pub mod zeroshot;
 
 use ort::session::{OutputSelector, RunOptions, Session, SessionOutputs};
 
-use crate::model::OutSel;
+use crate::{
+	model::OutSel,
+	tokenize::{make_inputs, Encoded},
+};
 
 pub(crate) struct Fwd<'a> {
 	pub shape: Vec<usize>,
@@ -40,6 +43,24 @@ pub(crate) fn run_forward<R>(
 		shape: shape.iter().map(|&d| d as usize).collect(),
 		data,
 	})
+}
+
+/// Forwards `enc` in slices of at most `max_rows` rows so one big request cannot
+/// blow up activation memory; `f` maps each slice's output to one item per row
+/// (it also gets the slice, e.g. for its attention mask).
+pub(crate) fn forward_rows<R>(
+	session: &mut Session,
+	enc: &Encoded,
+	max_rows: usize,
+	sel: &OutSel,
+	mut f: impl FnMut(Fwd<'_>, &Encoded) -> crate::Result<Vec<R>>,
+) -> crate::Result<Vec<R>> {
+	let mut out = Vec::with_capacity(enc.batch);
+	for part in enc.split(max_rows) {
+		let inputs = make_inputs(session, &part)?;
+		out.extend(run_forward(session, inputs, sel, |fwd| f(fwd, &part))?);
+	}
+	Ok(out)
 }
 
 pub(crate) fn softmax(logits: &[f32]) -> Vec<f64> {
