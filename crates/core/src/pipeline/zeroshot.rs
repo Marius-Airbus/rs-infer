@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
-use ort::session::Session;
+use ort::session::{Session, SessionInputs};
 
 use crate::{
 	model::{Meta, OutSel},
-	pipeline::{blocking, forward, run_rows, softmax, warn_truncated, Extract, RowOut},
+	pipeline::{blocking, run_forward, run_rows, softmax, warn_truncated, Extract, RowOut},
 	tokenize::Encoded,
 	Error, LoadedModel, Result,
 };
@@ -78,8 +78,8 @@ async fn logit_rows(model: &Arc<LoadedModel>, enc: Encoded, queue_wait: Duration
 
 /// Batch extractor for NLI models: the raw class logits of each (premise, hypothesis) row.
 pub(crate) fn extractor(output: OutSel) -> Arc<Extract> {
-	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
-		forward(session, enc, &output, |fwd| match fwd.shape.as_slice() {
+	Arc::new(move |session: &mut Session, inputs: SessionInputs<'static, 'static>, _: &Encoded| -> Result<Vec<RowOut>> {
+		run_forward(session, inputs, &output, |fwd| match fwd.shape.as_slice() {
 			[_, k] => Ok(fwd.data.chunks(*k).map(|row| RowOut::Logits(row.to_vec())).collect()),
 			other => Err(Error::BadOutputShape(other.to_vec())),
 		})

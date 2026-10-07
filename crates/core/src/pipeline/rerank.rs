@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use ort::session::Session;
+use ort::session::{Session, SessionInputs};
 
 use crate::{
 	config::Scoring,
 	model::{Meta, OutSel},
-	pipeline::{blocking, forward, run_rows, softmax, warn_truncated, Extract, Fwd, RowOut},
+	pipeline::{blocking, run_forward, run_rows, softmax, warn_truncated, Extract, Fwd, RowOut},
 	tokenize::Encoded,
 	Error, LoadedModel, Result,
 };
@@ -88,8 +88,8 @@ pub async fn score_text_pairs(model: &Arc<LoadedModel>, pairs: Vec<(String, Stri
 
 /// Batch extractor for rerank models: one relevance score per (query, document) row.
 pub(crate) fn extractor(scoring: Scoring, yes_id: Option<u32>, no_id: Option<u32>, output: OutSel) -> Arc<Extract> {
-	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
-		let scores = forward(session, enc, &output, |fwd| apply_scoring(&fwd, scoring, yes_id, no_id, &enc.attention_mask))?;
+	Arc::new(move |session: &mut Session, inputs: SessionInputs<'static, 'static>, enc: &Encoded| -> Result<Vec<RowOut>> {
+		let scores = run_forward(session, inputs, &output, |fwd| apply_scoring(&fwd, scoring, yes_id, no_id, &enc.attention_mask))?;
 		Ok(scores.into_iter().map(RowOut::Score).collect())
 	})
 }

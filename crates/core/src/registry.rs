@@ -15,7 +15,7 @@ use crate::{
 	pipeline::{self, Extract},
 	pool::SessionPool,
 	quantize,
-	tokenize::Encoder,
+	tokenize::{Encoder, InputSpec},
 	Error, LoadedModel, Result,
 };
 
@@ -159,6 +159,7 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 	let input_names = first.inputs().iter().map(|i| i.name().to_string()).collect();
 	let output_names = first.outputs().iter().map(|o| o.name().to_string()).collect();
 	let meta = build_meta(cfg, &resolved, &encoder, first)?;
+	let inputs = Arc::new(InputSpec::of(first)?);
 
 	let rss_after = crate::memory::rss_mb().unwrap_or(0);
 	let rss_used = rss_after.saturating_sub(rss_before);
@@ -181,12 +182,15 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 	);
 	let pool = Arc::new(SessionPool::new(sessions, max_queue));
 	let extract = build_extract(&meta);
-	let batcher = cfg.batching.enabled.then(|| Batcher::new(pool.clone(), extract.clone(), cfg.batching));
+	// Accelerators: prepare the next batch while one runs (2 workers per session).
+	let workers_per_replica = if eps.iter().all(|e| e == "cpu") { 1 } else { 2 };
+	let batcher = cfg.batching.enabled.then(|| Batcher::new(pool.clone(), extract.clone(), inputs.clone(), cfg.batching, workers_per_replica));
 	Ok(Arc::new(LoadedModel {
 		cfg: cfg.clone(),
 		encoder,
 		pool,
 		extract,
+		inputs,
 		batcher,
 		meta,
 		source: resolved.source,
@@ -358,9 +362,12 @@ fn quality_gate(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, 
 	let enc = quantize::calibration(encoder, cfg.kind)?;
 	let mut reference_session = new_session(&resolved.model, cfg)?;
 	let extract = build_extract(&build_meta(cfg, resolved, encoder, &reference_session)?);
-	let reference = extract(&mut reference_session, &enc)?;
+	let inputs = InputSpec::of(&reference_session)?.build(&enc)?;
+	let reference = extract(&mut reference_session, inputs, &enc)?;
 	drop(reference_session);
-	let candidate = extract(&mut new_session(int8, cfg)?, &enc)?;
+	let mut candidate_session = new_session(int8, cfg)?;
+	let inputs = InputSpec::of(&candidate_session)?.build(&enc)?;
+	let candidate = extract(&mut candidate_session, inputs, &enc)?;
 	let check = quantize::compare(&reference, &candidate, &enc.attention_mask)?;
 	let verdict = format!("{} {} {:.4} (threshold {})", if check.pass { "pass" } else { "fail" }, check.metric, check.worst, check.threshold);
 	if let Err(e) = std::fs::write(&verdict_file, &verdict) {

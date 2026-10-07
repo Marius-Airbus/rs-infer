@@ -7,11 +7,11 @@ pub mod zeroshot;
 
 use std::{sync::Arc, time::Duration};
 
-use ort::session::{OutputSelector, RunOptions, Session, SessionOutputs};
+use ort::session::{OutputSelector, RunOptions, Session, SessionInputs, SessionOutputs};
 
 use crate::{
 	model::OutSel,
-	tokenize::{make_inputs, Encoded, Row},
+	tokenize::{Encoded, Row},
 	LoadedModel,
 };
 
@@ -68,9 +68,10 @@ impl RowOut {
 	}
 }
 
-/// Forward pass + per-row post-processing of one right-padded batch. Built per
-/// model at load time and shared by the batcher and the direct path.
-pub type Extract = dyn Fn(&mut Session, &Encoded) -> crate::Result<Vec<RowOut>> + Send + Sync;
+/// Forward pass + per-row post-processing of one right-padded batch, given its
+/// prepared input tensors (see [`crate::tokenize::InputSpec`]). Built per model
+/// at load time and shared by the batcher and the direct path.
+pub type Extract = dyn Fn(&mut Session, SessionInputs<'static, 'static>, &Encoded) -> crate::Result<Vec<RowOut>> + Send + Sync;
 
 /// Runs `enc`'s rows through `model`, one output per row in input order: via the
 /// cross-request batcher when the model has one and the request fits its queue,
@@ -79,10 +80,12 @@ pub(crate) async fn run_rows(model: &Arc<LoadedModel>, enc: Encoded, queue_wait:
 	if let Some(batcher) = model.batcher.as_ref().filter(|b| enc.batch <= b.capacity()) {
 		return batcher.submit(enc.into_rows(), queue_wait).await;
 	}
-	let extract = Arc::clone(&model.extract);
+	let (extract, spec) = (Arc::clone(&model.extract), Arc::clone(&model.inputs));
 	let (max_rows, max_tokens) = (model.cfg.max_batch, model.cfg.batching.max_tokens);
 	let pooled = model.pool.acquire(queue_wait).await?;
-	pooled.run_blocking(move |session| run_sorted(enc.into_rows(), max_rows, max_tokens, |batch| extract(session, batch))).await
+	pooled
+		.run_blocking(move |session| run_sorted(enc.into_rows(), max_rows, max_tokens, |batch| extract(session, spec.build(batch)?, batch)))
+		.await
 }
 
 /// Runs `rows` shortest first, in batches of at most `max_rows` rows and
@@ -106,12 +109,6 @@ fn run_sorted(rows: Vec<Row>, max_rows: usize, max_tokens: usize, mut run: impl 
 		.into_iter()
 		.map(|o| o.ok_or_else(|| crate::Error::Ort(ort::Error::new("a batch returned fewer outputs than rows"))))
 		.collect()
-}
-
-/// Builds `enc`'s inputs, runs the model and hands the selected output to `f`.
-pub(crate) fn forward<R>(session: &mut Session, enc: &Encoded, sel: &OutSel, f: impl FnOnce(Fwd<'_>) -> crate::Result<R>) -> crate::Result<R> {
-	let inputs = make_inputs(session, enc)?;
-	run_forward(session, inputs, sel, f)
 }
 
 pub(crate) struct Fwd<'a> {

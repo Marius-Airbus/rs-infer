@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use ort::session::Session;
+use ort::session::{Session, SessionInputs};
 
 use crate::{
 	config::Pooling,
 	model::{Meta, OutSel},
-	pipeline::{blocking, forward, run_rows, warn_truncated, Extract, Fwd, RowOut},
+	pipeline::{blocking, run_forward, run_rows, warn_truncated, Extract, Fwd, RowOut},
 	tokenize::{Encoded, Row},
 	Error, LoadedModel, Result,
 };
@@ -53,8 +53,8 @@ fn ensure_embedding(model: &LoadedModel) -> Result<()> {
 /// Batch extractor for embedding models: pooling, then Matryoshka truncation and
 /// L2 normalization as configured.
 pub(crate) fn extractor(pooling: Pooling, output: OutSel, normalize: bool, dimensions: Option<usize>) -> Arc<Extract> {
-	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
-		let rows = forward(session, enc, &output, |fwd| pool_rows(&fwd, pooling, &enc.attention_mask))?;
+	Arc::new(move |session: &mut Session, inputs: SessionInputs<'static, 'static>, enc: &Encoded| -> Result<Vec<RowOut>> {
+		let rows = run_forward(session, inputs, &output, |fwd| pool_rows(&fwd, pooling, &enc.attention_mask))?;
 		Ok(rows
 			.into_iter()
 			.map(|mut v| {
