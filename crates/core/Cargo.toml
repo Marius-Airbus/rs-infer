@@ -21,7 +21,8 @@ lax-ep-matching = ["ort/lax-feature-matching"]
 ep-openvino = ["ort/openvino", "ort/load-dynamic", "ort/api-24"]
 
 [dependencies]
-ort = { workspace = true, features = ["ndarray", "tracing"] }
+ort = { workspace = true, features = ["ndarray", "tracing", "half"] }
+half = { version = "2.1", default-features = false }
 tokenizers = { workspace = true }
 hf-hub = { workspace = true }
 ndarray = { workspace = true }

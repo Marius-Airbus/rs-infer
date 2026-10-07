@@ -102,8 +102,9 @@ pub enum CoreMlComputeUnits {
 /// Precision of the graph the model runs.
 /// - `auto`: on CPU-only execution, the server's own per-channel int8 rewrite of
 ///   the fp32 graph (cached, kept only if it passes a quality check against
-///   fp32, see `quantize`); with GPU/CoreML execution providers, the published
-///   graph (fp32 first, else fp16 > quantized files).
+///   fp32, see `quantize`); led by a GPU provider (cuda / tensorrt / nvrtx),
+///   the published fp16 graph (fp32 if none); with other accelerators, the
+///   published graph (fp32 first, else fp16 > quantized files).
 /// - `int8`: that int8 rewrite whatever the providers (the publisher's int8
 ///   files if the repo has no fp32 graph).
 /// - `fp32` / `fp16`: the published graph of that format.

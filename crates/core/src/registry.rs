@@ -128,7 +128,8 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 	let rss_before = crate::memory::rss_mb().unwrap_or(0);
 	tracing::info!(model = cfg.name.as_str(), kind = cfg.kind.as_str(), replicas = cfg.replicas, "loading model");
 
-	let resolved = hub::resolve(cfg, hf_cache)?;
+	let (eps, _) = resolve_eps(cfg);
+	let resolved = hub::resolve(&graph_preference(cfg, &eps), hf_cache)?;
 	let model_mb = crate::memory::model_size_mb(&resolved.model).unwrap_or(0);
 	tracing::info!(
 		model = cfg.name.as_str(),
@@ -146,7 +147,6 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 	};
 	let encoder = Encoder::new(&resolved.tokenizer, cfg.max_len, stride)?;
 
-	let (eps, _) = resolve_eps(cfg);
 	let (graph, precision) = choose_graph(cfg, &resolved, &encoder, &eps, hf_cache);
 	let (graph, pooling_in_graph) = pool_in_graph(cfg, &resolved, graph, &eps, hf_cache);
 	let t_sessions = std::time::Instant::now();
@@ -249,6 +249,21 @@ fn build_meta(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, se
 			}
 		}
 	})
+}
+
+/// GPU execution providers, which `dtype: auto` runs in fp16.
+const GPU_EPS: &[&str] = &["cuda", "tensorrt", "nvrtx"];
+
+/// The config the published graph is picked with: `dtype: auto` led by a GPU
+/// provider prefers the fp16 graph (fp32 if the repo has none) for half the
+/// memory traffic and tensor-core math.
+fn graph_preference<'a>(cfg: &'a ModelConfig, eps: &[String]) -> std::borrow::Cow<'a, ModelConfig> {
+	if cfg.dtype == Dtype::Auto && eps.first().is_some_and(|e| GPU_EPS.contains(&e.as_str())) {
+		let mut fp16 = cfg.clone();
+		fp16.dtype = Dtype::Fp16;
+		return std::borrow::Cow::Owned(fp16);
+	}
+	std::borrow::Cow::Borrowed(cfg)
 }
 
 fn resolve_pooling(cfg: &ModelConfig, resolved: &hub::Resolved) -> Pooling {
@@ -358,3 +373,7 @@ fn quality_gate(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, 
 	}
 	Ok(check.pass)
 }
+
+#[cfg(test)]
+#[path = "tests/registry_tests.rs"]
+mod tests;

@@ -314,6 +314,7 @@ fn empty_kv_cache(input: &Outlet, batch: usize) -> Result<SessionInputValue<'sta
 	let shape = vec![batch as i64, dims[1], 0, dims[3]];
 	match input.dtype().tensor_type() {
 		Some(TensorElementType::Float32) => Ok(Tensor::from_array((shape, Vec::<f32>::new()))?.into()),
+		Some(TensorElementType::Float16) => Ok(Tensor::from_array((shape, Vec::<half::f16>::new()))?.into()),
 		Some(other) => Err(Error::Ort(ort::Error::new(format!(
 			"unsupported KV-cache dtype {other:?} for '{}'",
 			input.name()

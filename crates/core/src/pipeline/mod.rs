@@ -140,11 +140,17 @@ pub(crate) fn run_forward<R>(
 	let value = outputs
 		.get(&sel.0)
 		.ok_or_else(|| crate::Error::Ort(ort::Error::new(format!("output '{}' not found; model has {names:?}", sel.0))))?;
-	let (shape, data) = value.try_extract_tensor::<f32>()?;
-	f(Fwd {
-		shape: shape.iter().map(|&d| d as usize).collect(),
-		data,
-	})
+	let converted: Vec<f32>;
+	let (shape, data): (Vec<usize>, &[f32]) = match value.try_extract_tensor::<f32>() {
+		Ok((shape, data)) => (shape.iter().map(|&d| d as usize).collect(), data),
+		Err(_) => {
+			// fp16 graphs (the GPU default) may return half-precision outputs.
+			let (shape, data) = value.try_extract_tensor::<half::f16>()?;
+			converted = data.iter().map(|v| v.to_f32()).collect();
+			(shape.iter().map(|&d| d as usize).collect(), &converted)
+		}
+	};
+	f(Fwd { shape, data })
 }
 
 /// The tokenizer cuts inputs longer than `max_len`; say so rather than silently

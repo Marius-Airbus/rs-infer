@@ -29,3 +29,21 @@ fn direct_path_respects_the_padded_token_budget() {
 	.unwrap();
 	assert_eq!(sizes, [2, 1]);
 }
+
+#[test]
+fn half_precision_outputs_are_read_as_f32() {
+	use std::borrow::Cow;
+
+	use ort::{session::SessionInputs, value::Tensor};
+
+	use crate::test_fixtures::onnx;
+
+	// y = Cast(x, to = FLOAT16): an fp16 graph output.
+	let model = onnx::model(17, &[onnx::node("Cast", &["x"], &["y"], &[("to", 10)])], &[onnx::value_info("x", 1)], &[onnx::value_info("y", 10)]);
+	crate::ep::init_shared_thread_pool(2).unwrap();
+	let mut session = Session::builder().unwrap().commit_from_memory(&model).unwrap();
+	let x = Tensor::from_array((vec![3i64], vec![1.0f32, 2.5, -3.0])).unwrap();
+	let inputs = SessionInputs::ValueMap(vec![(Cow::Borrowed("x"), x.into())]);
+	let (shape, data) = run_forward(&mut session, inputs, &OutSel("y".into()), |fwd| Ok((fwd.shape, fwd.data.to_vec()))).unwrap();
+	assert_eq!((shape, data), (vec![3], vec![1.0, 2.5, -3.0]));
+}
