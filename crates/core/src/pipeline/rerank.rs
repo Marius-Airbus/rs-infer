@@ -77,7 +77,7 @@ fn apply_scoring(fwd: &Fwd<'_>, mut scoring: Scoring, yes_id: Option<u32>, no_id
 				.map(|i| {
 					let row = &fwd.data[i * 2..(i + 1) * 2];
 					match scoring {
-						Scoring::Sigmoid => 1.0 / (1.0 + -(row[1] as f64 - row[0] as f64)).exp(),
+						Scoring::Sigmoid => 1.0 / (1.0 + (-(row[1] as f64 - row[0] as f64)).exp()),
 						_ => softmax(row)[1],
 					}
 				})

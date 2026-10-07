@@ -33,6 +33,16 @@ fn softmax_two_column() {
 }
 
 #[test]
+fn sigmoid_two_column_is_sigmoid_of_logit_diff() {
+	let d: Vec<f32> = vec![0.0, 0.0, /* row 1 */ 0.0, 3.0];
+	let fwd = Fwd { shape: vec![2, 2], data: &d };
+	let s = apply_scoring(&fwd, Scoring::Sigmoid, None, None, &[vec![1], vec![1]]).unwrap();
+	assert!((s[0] - 0.5).abs() < 1e-9, "got {}", s[0]);
+	let expect = 1.0 / (1.0 + (-3.0f64).exp());
+	assert!((s[1] - expect).abs() < 1e-9, "got {}", s[1]);
+}
+
+#[test]
 fn yes_no_uses_last_real_token() {
 	// [B=1, S=2, V=3]: token ids: yes=1, no=2; both positions real -> score at last
 	let d: Vec<f32> = vec![0.0, 0.0, 10.0, /* pos 1 */ 0.0, 5.0, 0.0];
