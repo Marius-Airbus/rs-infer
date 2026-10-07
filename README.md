@@ -39,6 +39,7 @@ cp configs/config.example.yaml config.yaml       # pick your models
 | Linux + CUDA | `make gpu-cuda` | needs CUDA ≥ 13.2 & cuDNN 9 on `PATH` |
 | Linux + TensorRT | `make gpu-trt` | datacenter GPUs |
 | Linux + TensorRT-RTX | `make gpu-rtx` | consumer GeForce/RTX |
+| Linux + Intel OpenVINO | `make cpu-openvino` | experimental; run with `ORT_DYLIB_PATH` from `scripts/fetch-openvino-runtime.sh` |
 
 First boot downloads the configured models into the HF cache (`HF_HOME` respected;
 `HF_ENDPOINT` for a Hub mirror, `HF_TOKEN` for gated repos).

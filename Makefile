@@ -1,7 +1,7 @@
 # Build profiles (ONNX Runtime prebuilt binaries do not combine all EPs).
 BIN = rsinfer-server
 
-.PHONY: mac mac-coreml gpu-cuda gpu-trt gpu-rtx cpu test fmt lint docs docs-build docs-clean
+.PHONY: mac mac-coreml gpu-cuda gpu-trt gpu-rtx cpu-openvino cpu test fmt lint docs docs-build docs-clean
 
 cpu:            ## CPU-only (works everywhere)
 	cargo build --release -p rsinfer-server
@@ -17,6 +17,9 @@ gpu-trt:        ## Linux + TensorRT (datacenter GPUs, includes CUDA)
 
 gpu-rtx:        ## Linux + TensorRT for RTX (consumer GeForce/RTX cards)
 	cargo build --release -p $(BIN) --features ep-nvrtx,lax-ep-matching
+
+cpu-openvino:   ## Linux + Intel OpenVINO (experimental): ONNX Runtime loaded at runtime, see scripts/fetch-openvino-runtime.sh
+	cargo build --release -p $(BIN) --no-default-features --features ep-openvino
 
 mac: mac-coreml
 test:

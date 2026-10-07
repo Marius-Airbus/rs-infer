@@ -38,7 +38,7 @@ pub fn init_shared_thread_pool(threads: usize) -> Result<usize> {
 }
 
 /// All EPs known to the runtime, with compile-time availability.
-pub const ALL_EPS: &[EpName] = &[EpName::Cpu, EpName::Coreml, EpName::Cuda, EpName::Tensorrt, EpName::Nvrtx];
+pub const ALL_EPS: &[EpName] = &[EpName::Cpu, EpName::Coreml, EpName::Cuda, EpName::Tensorrt, EpName::Nvrtx, EpName::Openvino];
 
 pub fn compiled_in(ep: EpName) -> bool {
 	match ep {
@@ -51,6 +51,8 @@ pub fn compiled_in(ep: EpName) -> bool {
 		EpName::Tensorrt => true,
 		#[cfg(feature = "ep-nvrtx")]
 		EpName::Nvrtx => true,
+		#[cfg(feature = "ep-openvino")]
+		EpName::Openvino => true,
 		_ => false,
 	}
 }
@@ -67,6 +69,8 @@ pub fn runtime_available(ep: EpName) -> bool {
 		EpName::Tensorrt => ep::TensorRT::default().is_available().unwrap_or(false),
 		#[cfg(feature = "ep-nvrtx")]
 		EpName::Nvrtx => ep::NVRTX::default().is_available().unwrap_or(false),
+		#[cfg(feature = "ep-openvino")]
+		EpName::Openvino => ep::OpenVINO::default().is_available().unwrap_or(false),
 		_ => false,
 	}
 }
@@ -104,6 +108,15 @@ fn dispatch(cfg: &ModelConfig, name: EpName) -> Option<ExecutionProviderDispatch
 			}
 			Some(b.build())
 		}
+		// fp32 graphs only: OpenVINO runs dynamic int8 (MatMulInteger) 2-4x slower than
+		// ORT's CPU kernels, which is why `dtype: auto` keeps the published graph here.
+		#[cfg(feature = "ep-openvino")]
+		EpName::Openvino => Some(
+			ep::OpenVINO::default()
+				.with_device_type(&cfg.openvino_device)
+				.with_cache_dir(std::env::temp_dir().join("rsinfer-openvino").display().to_string())
+				.build(),
+		),
 		_ => None,
 	}
 }

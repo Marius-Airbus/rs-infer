@@ -6,12 +6,14 @@ license.workspace = true
 description = "HTTP inference API (vLLM-compatible embeddings/rerank + PII + zero-shot classify)"
 
 [features]
-default = []
+default = ["download-binaries"]
+download-binaries = ["rsinfer-core/download-binaries"]
 ep-coreml = ["rsinfer-core/ep-coreml"]
 ep-cuda = ["rsinfer-core/ep-cuda"]
 ep-tensorrt = ["rsinfer-core/ep-tensorrt"]
 ep-nvrtx = ["rsinfer-core/ep-nvrtx"]
 lax-ep-matching = ["rsinfer-core/lax-ep-matching"]
+ep-openvino = ["rsinfer-core/ep-openvino"]
 
 [dependencies]
 rsinfer-core = { workspace = true }

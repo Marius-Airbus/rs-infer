@@ -30,6 +30,7 @@ pub enum EpName {
 	Cuda,
 	Tensorrt,
 	Nvrtx,
+	Openvino,
 }
 
 impl EpName {
@@ -40,6 +41,7 @@ impl EpName {
 			EpName::Cuda => "cuda",
 			EpName::Tensorrt => "tensorrt",
 			EpName::Nvrtx => "nvrtx",
+			EpName::Openvino => "openvino",
 		}
 	}
 }
@@ -269,6 +271,9 @@ pub struct ModelConfig {
 	pub trt_engine_cache: Option<PathBuf>,
 	#[serde(default)]
 	pub device_id: i32,
+	/// OpenVINO device: CPU (default), GPU (Intel GPUs), NPU, or AUTO.
+	#[serde(default = "default_openvino_device")]
+	pub openvino_device: String,
 
 	/// ORT profiling file prefix, set programmatically by the `profile` command;
 	/// not configurable from YAML.
@@ -281,6 +286,9 @@ fn default_revision() -> String {
 }
 fn default_replicas() -> usize {
 	2
+}
+fn default_openvino_device() -> String {
+	"CPU".into()
 }
 fn default_max_batch() -> usize {
 	32
@@ -332,6 +340,7 @@ impl Default for ModelConfig {
 			coreml_compute_units: CoreMlComputeUnits::All,
 			trt_engine_cache: None,
 			device_id: 0,
+			openvino_device: default_openvino_device(),
 			profiling_prefix: None,
 		}
 	}

@@ -9,8 +9,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/marius-brt/rs-infer"
 
 [workspace.dependencies]
-rsinfer-core = { path = "crates/core" }
-ort = { version = "=2.0.0-rc.13" }
+rsinfer-core = { path = "crates/core", default-features = false }
+# How ONNX Runtime is linked is chosen by rsinfer-core's features
+# (download-binaries by default, load-dynamic for OpenVINO).
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing"] }
 tokenizers = { version = "0.22" }
 hf-hub = "0.5"
 ndarray = "0.17"

@@ -6,13 +6,19 @@ license.workspace = true
 description = "ORT-powered inference engine: embedding, rerank, zero-shot, PII pipelines"
 
 [features]
-default = []
+default = ["download-binaries"]
+# Link the prebuilt ONNX Runtime fetched at build time (every profile but OpenVINO).
+download-binaries = ["ort/download-binaries", "ort/copy-dylibs", "ort/tls-native", "ort/api-27"]
 ep-coreml = ["ort/coreml"]
 ep-cuda = ["ort/cuda"]
 ep-tensorrt = ["ort/tensorrt"]
 ep-nvrtx = ["ort/nvrtx"]
 # allow non-exact prebuilt binary match (e.g. cuda+tensorrt+nvrtx combos)
 lax-ep-matching = ["ort/lax-feature-matching"]
+# Intel OpenVINO: loads an onnxruntime-openvino build (>= 1.24) at runtime from
+# ORT_DYLIB_PATH instead of linking ONNX Runtime; build with --no-default-features
+# (`make cpu-openvino`, runtime libraries via scripts/fetch-openvino-runtime.sh).
+ep-openvino = ["ort/openvino", "ort/load-dynamic", "ort/api-24"]
 
 [dependencies]
 ort = { workspace = true, features = ["ndarray", "tracing"] }

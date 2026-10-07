@@ -148,7 +148,7 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 	let config = Arc::new(config);
 
 	tracing::info!(
-		"rsinfer v{} starting with {} model(s) on {} ({}); EP features: coreml={} cuda={} tensorrt={} nvrtx={}",
+		"rsinfer v{} starting with {} model(s) on {} ({}); EP features: coreml={} cuda={} tensorrt={} nvrtx={} openvino={}",
 		env!("CARGO_PKG_VERSION"),
 		config.models.len(),
 		std::env::consts::OS,
@@ -157,6 +157,7 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 		cfg!(feature = "ep-cuda"),
 		cfg!(feature = "ep-tensorrt"),
 		cfg!(feature = "ep-nvrtx"),
+		cfg!(feature = "ep-openvino"),
 	);
 	if let Some(rss) = rsinfer_core::memory::rss_mb() {
 		tracing::info!(ram_mb = rss, "process memory at startup");

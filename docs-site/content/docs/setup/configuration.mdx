@@ -185,6 +185,30 @@ final fallback. `GET /v1/models` reports what each model actually uses.
 | `cuda` | `ep-cuda` | Linux + CUDA/cuDNN |
 | `tensorrt` | `ep-cuda,ep-tensorrt` | Linux (datacenter GPUs) |
 | `nvrtx` | `ep-nvrtx,lax-ep-matching` | Linux (consumer GeForce/RTX, ORT 1.22+) |
+| `openvino` | `ep-openvino` (built with `--no-default-features`) | Linux x86_64, Intel CPU/GPU/NPU (experimental) |
+
+**OpenVINO (experimental).** `make cpu-openvino` builds a server that loads
+ONNX Runtime at startup instead of linking it: fetch Intel's runtime (ONNX
+Runtime 1.24 + OpenVINO 2025.4, ~215 MB) with
+`scripts/fetch-openvino-runtime.sh /opt/onnxruntime-openvino` and start the
+server with `ORT_DYLIB_PATH=/opt/onnxruntime-openvino/libonnxruntime.so.1.24.1`
+(Docker image: `--build-arg FEATURES=ep-openvino --target runtime-openvino`).
+Models opt in with `eps: [openvino, cpu]`; `openvino_device` picks `CPU`
+(default), `GPU`, `NPU` or `AUTO`. Models with `eps: [cpu]` keep running on ONNX
+Runtime's CPU kernels in the same server, int8 included.
+
+Measured on a 14-core i7-13850HX CPU, it does **not** beat the default build:
+- OpenVINO runs fp32 graphs ~1.2–1.3x faster than ONNX Runtime at a fixed
+  input shape, but dynamic int8 graphs 2–4x *slower*, so `dtype: auto` serves
+  the published fp32 graph on it — and the default build's int8 path is faster
+  still.
+- In the server (batched, varying shapes), a fp32 PII model on OpenVINO with
+  1 replica (it parallelizes internally; use `replicas: 1`) matched ONNX
+  Runtime with 2 replicas: 294 vs 330 req/s on 1-text requests, 54 vs 51
+  texts/s on 32-text requests, with a lower memory peak (1.5 vs 2.6 GB).
+
+Its use is therefore Intel GPUs/NPUs (Core Ultra) or fp32-only models on Intel
+hosts — measure on your hardware before adopting it.
 
 **CoreML caveat:** for small BERT-size encoders CoreML often ends up *slower*
 than CPU (ORT splits the graph into many CPU↔CoreML partitions). Default to
