@@ -1842,6 +1842,7 @@ dependencies = [
  "hf-hub",
  "libc",
  "ndarray",
+ "num_cpus",
  "ort",
  "serde",
  "serde_json",

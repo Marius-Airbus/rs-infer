@@ -25,6 +25,7 @@ serde_norway = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+num_cpus = "1"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"

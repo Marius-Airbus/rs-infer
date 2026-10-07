@@ -161,6 +161,8 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 	if let Some(rss) = rsinfer_core::memory::rss_mb() {
 		tracing::info!(ram_mb = rss, "process memory at startup");
 	}
+	let threads = rsinfer_core::ep::init_shared_thread_pool(config.server.threads)?;
+	tracing::info!(threads, "ONNX Runtime thread pool shared by all models");
 	tracing::info!(bind = %config.server.bind, "resolving and loading configured models (first run downloads from the HF Hub)");
 	let started = std::time::Instant::now();
 	let registry = Arc::new(Registry::load(config.clone()).await?);

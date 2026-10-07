@@ -33,7 +33,8 @@ pub struct ProfileArgs {
 	/// Dump an ORT profiling report here (prefix; writes <prefix>.json). Adds tracing overhead.
 	#[arg(long)]
 	pub profile_out: Option<PathBuf>,
-	/// Override the model's intra-op thread count (0 = ORT default: all cores).
+	/// Run the model on its own pool of this many threads instead of the shared
+	/// pool (`server.threads`, default: physical cores).
 	#[arg(long)]
 	pub intra_threads: Option<usize>,
 }
@@ -60,6 +61,7 @@ pub async fn run(args: ProfileArgs) -> anyhow::Result<()> {
 	// Measure one forward of `--batch` rows, not `max_batch`-sized slices.
 	cfg.max_batch = args.batch;
 	cfg.profiling_prefix = args.profile_out.clone();
+	rsinfer_core::ep::init_shared_thread_pool(config.server.threads)?;
 
 	let cache = config.server.hf_cache_dir.clone();
 	let load_cfg = cfg.clone();

@@ -155,6 +155,10 @@ pub struct ServerConfig {
 	pub queue_timeout_ms: u64,
 	/// Directory used by hf-hub for downloads (also honors HF_HOME).
 	pub hf_cache_dir: Option<PathBuf>,
+	/// Threads of the ONNX Runtime pool shared by every session of every model;
+	/// 0 = number of physical cores. A model with `intra_threads > 0` gets its
+	/// own pool instead.
+	pub threads: usize,
 }
 
 impl Default for ServerConfig {
@@ -166,6 +170,7 @@ impl Default for ServerConfig {
 			max_queue: 256,
 			queue_timeout_ms: 30_000,
 			hf_cache_dir: None,
+			threads: 0,
 		}
 	}
 }
@@ -202,8 +207,8 @@ pub struct ModelConfig {
 	/// Number of concurrent sessions (pool replicas) for this model.
 	#[serde(default = "default_replicas")]
 	pub replicas: usize,
-	/// intra-op threads per session; 0 = all logical cores per replica (measured
-	/// fastest on M5 Pro with multi-replica; set e.g. cores/replicas on NUMA hosts).
+	/// 0 = sessions run on the shared thread pool (`server.threads`); > 0 = each
+	/// session of this model gets its own pool of that many threads.
 	#[serde(default)]
 	pub intra_threads: usize,
 	/// Execution provider priority list; entries not compiled in are skipped with a warning.

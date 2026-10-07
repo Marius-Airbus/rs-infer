@@ -66,6 +66,7 @@ server:
 | `max_queue` | int | `256` | Max HTTP connections waiting for a session slot *per model*; overflow → `429`. |
 | `queue_timeout_ms` | int | `30000` | How long a request waits for a session slot; slow queue → `503`. |
 | `hf_cache_dir` | path | *(unset)* | Directory used for Hugging Face downloads. Defaults to `HF_HOME` or `~/.cache/huggingface`. |
+| `threads` | int | `0` | Size of the ONNX Runtime thread pool shared by all sessions of all models; `0` = number of physical cores. Raising it to all logical cores usually *hurts* (SMT siblings / efficiency cores slow every parallel op down). |
 
 ## Model options
 
@@ -85,7 +86,7 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 | `max_len` | int | *(unset)* | Tokenizer truncation length. Longer inputs are truncated and a `WARN` log line reports how many — except for `pii` models, which scan long texts in windows of `max_len` tokens overlapping by a quarter, so no PII escapes detection. |
 | `replicas` | int | `2` | Number of concurrent ORT sessions (pool replicas) — a memory vs throughput dial. |
 | `max_batch` | int | `32` | Max rows per forward pass. Bigger requests (many texts, rerank documents, zero-shot text × label pairs, PII windows) run as successive slices, bounding activation memory per request. |
-| `intra_threads` | int | `0` | intra-op threads per session; `0` = ORT default. |
+| `intra_threads` | int | `0` | `0` = sessions run on the shared pool (`server.threads`). `> 0` = each session of this model gets its own pool of that many threads (e.g. to isolate a model, or on NUMA hosts). |
 | `eps` | list[string] | `[cpu]` | Execution provider priority list (see [Execution providers](#execution-providers)). |
 | `default` | bool | `false` | Make this model the default for its kind (requests without a `model` field use it). If unset, the single model of a kind is the default. |
 | `ort_log_level` | string | `warn` | ORT native log level: `verbose`, `info`, `warn`, `error`. `error` silences CoreML/TensorRT graph-partition chatter. |

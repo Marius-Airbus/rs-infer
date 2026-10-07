@@ -13,8 +13,28 @@ use crate::{
 	Error, Result,
 };
 
-fn available_parallelism() -> usize {
-	std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+static SHARED_POOL_THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Installs the ONNX Runtime intra-op thread pool shared by all sessions
+/// (`threads` = 0: physical cores) and returns its size. Must run before any
+/// session is built; later calls return the existing size.
+///
+/// One shared pool sized to physical cores beats per-session pools: replicas'
+/// pools oversubscribe the CPU, and threads on SMT siblings / efficiency cores
+/// make every parallel op wait for the slowest one. On a 14-core i7-13850HX
+/// (e5-small int8, 1-text requests, 4 replicas) it gave 1020 req/s vs 655 with
+/// four 4-thread pools and 60 with the former 2 x all-logical-cores default.
+pub fn init_shared_thread_pool(threads: usize) -> Result<usize> {
+	if let Some(&n) = SHARED_POOL_THREADS.get() {
+		return Ok(n);
+	}
+	let n = if threads > 0 { threads } else { num_cpus::get_physical().max(1) };
+	let options = ort::environment::GlobalThreadPoolOptions::default().with_intra_threads(n)?;
+	if !ort::init().with_global_thread_pool(options).commit() {
+		return Err(Error::Config("ONNX Runtime was initialized before the shared thread pool could be installed".into()));
+	}
+	let _ = SHARED_POOL_THREADS.set(n);
+	Ok(n)
 }
 
 /// All EPs known to the runtime, with compile-time availability.
@@ -135,16 +155,19 @@ pub fn new_session(model_path: &std::path::Path, cfg: &ModelConfig) -> Result<Se
 	if let Some(prefix) = &cfg.profiling_prefix {
 		builder = builder.with_profiling(prefix).map_err(|e| Error::Ort(e.into()))?;
 	}
-	// intra_threads=0: give every replica a full-size pool (all logical cores).
-	// M5 Pro A/B (Qwen3-0.6B, embeddings, c8): 4 replicas x 14 threads beat
-	// 4x3 / 4x7 / 2x7 / 1x14 on both throughput and p50 — these GEMMs are
-	// memory-latency bound, so ORT pools overlap stalls better when each
-	// replica can spin up all cores. Set `intra_threads` to pin per-replica
-	// thread counts (e.g. on NUMA servers), where splitting is preferable.
-	let intra = if cfg.intra_threads > 0 { cfg.intra_threads } else { available_parallelism() };
-	builder = builder.with_intra_threads(intra).map_err(|e| Error::Ort(e.into()))?;
+	// intra_threads = 0: run on the shared pool (see init_shared_thread_pool), or
+	// ORT's per-session default (physical cores) if none was installed.
+	// intra_threads > 0: this session gets its own pool of exactly that size.
+	if cfg.intra_threads > 0 {
+		builder = builder.with_independent_thread_pool().map_err(|e| Error::Ort(e.into()))?;
+		builder = builder.with_intra_threads(cfg.intra_threads).map_err(|e| Error::Ort(e.into()))?;
+	}
 	if !dispatches.is_empty() {
 		builder = builder.with_execution_providers(dispatches).map_err(|e| Error::Ort(e.into()))?;
 	}
 	Ok(builder.commit_from_file(model_path)?)
 }
+
+#[cfg(test)]
+#[path = "tests/ep_tests.rs"]
+mod tests;
