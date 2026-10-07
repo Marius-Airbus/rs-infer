@@ -1,13 +1,13 @@
 use std::{
 	sync::{
 		atomic::{AtomicUsize, Ordering},
-		Mutex as StdMutex,
+		Arc, Mutex as StdMutex,
 	},
 	time::Duration,
 };
 
 use ort::session::Session;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{Error, Result};
 
@@ -15,20 +15,21 @@ use crate::{Error, Result};
 ///
 /// `ort::session::Session` is `Send` but not `Sync` (and `run` takes `&mut self`),
 /// so concurrency comes from replicas, matching ONNX Runtime's own guidance.
-pub struct SessionPool {
-	sessions: StdMutex<Vec<Session>>,
-	sem: Semaphore,
+/// Generic only so tests can pool plain values; the server always pools `Session`s.
+pub struct SessionPool<S = Session> {
+	sessions: Arc<StdMutex<Vec<S>>>,
+	sem: Arc<Semaphore>,
 	replicas: usize,
 	max_queue: usize,
 	waiting: AtomicUsize,
 }
 
-impl SessionPool {
-	pub fn new(sessions: Vec<Session>, max_queue: usize) -> Self {
+impl<S> SessionPool<S> {
+	pub fn new(sessions: Vec<S>, max_queue: usize) -> Self {
 		let replicas = sessions.len();
 		Self {
-			sessions: StdMutex::new(sessions),
-			sem: Semaphore::new(replicas),
+			sessions: Arc::new(StdMutex::new(sessions)),
+			sem: Arc::new(Semaphore::new(replicas)),
 			replicas,
 			max_queue,
 			waiting: AtomicUsize::new(0),
@@ -44,19 +45,19 @@ impl SessionPool {
 		self.sem.available_permits()
 	}
 
-	pub async fn acquire(&self, timeout: Duration) -> Result<Pooled<'_>> {
+	pub async fn acquire(&self, timeout: Duration) -> Result<Pooled<S>> {
 		if self.sem.available_permits() == 0 && self.waiting.load(Ordering::Relaxed) >= self.max_queue {
 			return Err(Error::Saturated);
 		}
 		self.waiting.fetch_add(1, Ordering::SeqCst);
-		struct Guard<'a>(&'a SessionPool);
+		struct Guard<'a>(&'a AtomicUsize);
 		impl Drop for Guard<'_> {
 			fn drop(&mut self) {
-				self.0.waiting.fetch_sub(1, Ordering::SeqCst);
+				self.0.fetch_sub(1, Ordering::SeqCst);
 			}
 		}
-		let guard = Guard(self);
-		let permit = tokio::time::timeout(timeout, self.sem.acquire())
+		let guard = Guard(&self.waiting);
+		let permit = tokio::time::timeout(timeout, Arc::clone(&self.sem).acquire_owned())
 			.await
 			.map_err(|_| Error::PoolTimeout)?
 			.map_err(|_| Error::Saturated)?;
@@ -69,51 +70,52 @@ impl SessionPool {
 		drop(guard);
 		Ok(Pooled {
 			session: Some(session),
-			pool: self,
+			sessions: Arc::clone(&self.sessions),
 			_permit: permit,
 		})
 	}
 }
 
-pub struct Pooled<'a> {
-	session: Option<Session>,
-	pool: &'a SessionPool,
-	_permit: SemaphorePermit<'a>,
+/// A checked-out session. Dropping it puts the session back, then releases the permit.
+pub struct Pooled<S = Session> {
+	session: Option<S>,
+	sessions: Arc<StdMutex<Vec<S>>>,
+	_permit: OwnedSemaphorePermit,
 }
 
-impl Pooled<'_> {
-	pub fn get_mut(&mut self) -> &mut Session {
+impl<S> Pooled<S> {
+	pub fn get_mut(&mut self) -> &mut S {
 		self.session.as_mut().expect("session taken")
 	}
 
 	/// Runs a blocking inference closure with the session off the async runtime.
+	///
+	/// The blocking task owns the checkout, so the session returns to the pool when
+	/// the work ends, even if `f` panics or this future is dropped mid-inference
+	/// (request timeout, client disconnect). Otherwise the permit would come back
+	/// without its session and later acquires would fail with `Saturated`.
 	pub async fn run_blocking<T, F>(mut self, f: F) -> Result<T>
 	where
+		S: Send + 'static,
 		T: Send + 'static,
-		F: FnOnce(&mut Session) -> Result<T> + Send + 'static,
+		F: FnOnce(&mut S) -> Result<T> + Send + 'static,
 	{
-		let mut session = self.session.take().expect("session taken");
-		let (session, out) = tokio::task::spawn_blocking(move || {
-			let out = f(&mut session);
-			(session, out)
-		})
-		.await
-		.map_err(|e| Error::Ort(ort::Error::new(format!("inference task panicked: {e}"))))?;
-		pool_session(self.pool, session);
-		out
+		tokio::task::spawn_blocking(move || f(self.get_mut()))
+			.await
+			.map_err(|e| Error::Ort(ort::Error::new(format!("inference task panicked: {e}"))))?
 	}
 }
 
-impl Drop for Pooled<'_> {
+impl<S> Drop for Pooled<S> {
 	fn drop(&mut self) {
 		if let Some(session) = self.session.take() {
-			pool_session(self.pool, session);
+			if let Ok(mut sessions) = self.sessions.lock() {
+				sessions.push(session);
+			}
 		}
 	}
 }
 
-fn pool_session(pool: &SessionPool, session: Session) {
-	if let Ok(mut guard) = pool.sessions.lock() {
-		guard.push(session);
-	}
-}
+#[cfg(test)]
+#[path = "tests/pool_tests.rs"]
+mod tests;
