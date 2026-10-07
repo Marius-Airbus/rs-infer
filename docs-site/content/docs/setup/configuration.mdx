@@ -123,6 +123,22 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 |-----|------|---------|-------------|
 | `threshold` | float | `0.5` | Minimum token probability; below it the token is treated as outside any entity. |
 
+### Sizing memory and throughput
+
+- **Each replica holds its own copy of the weights** (ONNX Runtime sessions cannot
+  safely run concurrently, so concurrency comes from replicas). Budget roughly the
+  model's file size plus runtime buffers per replica: e5-small fp32 is ~550 MB per
+  replica (its 250k-token embedding table dominates), Qwen3-Embedding-0.6B int8
+  ~1 GB, fp32 well over 3 GB. `dtype: int8` divides weight memory by ~4.
+- **Peak memory under load is driven by the batch size in padded tokens.**
+  `batching.max_tokens` bounds it per forward (times the number of replicas
+  running at once). Lower it for large models: Qwen3-Embedding-0.6B int8 with
+  2 replicas and `max_tokens: 4096` peaks at ~4.6 GB under sustained load.
+- **Replicas vs throughput:** with batching on, 2–4 replicas keep the CPU busy;
+  on a 14-core i7, 4 replicas served ~30–50% more short requests than 2.
+- Disabling ONNX Runtime's CPU memory arena does *not* save memory — it made peak
+  usage worse in tests (allocator fragmentation).
+
 ### Execution providers
 
 `eps` is a priority list. Entries not compiled into the binary, or absent from
