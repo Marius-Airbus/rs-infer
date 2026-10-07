@@ -29,13 +29,22 @@ const INT64: u64 = 7;
 
 /// Graph output names of the model at `path`.
 pub fn output_names(path: &Path) -> Result<Vec<String>> {
+	io_names(path, 12)
+}
+
+/// Graph input names of the model at `path`.
+pub fn input_names(path: &Path) -> Result<Vec<String>> {
+	io_names(path, 11)
+}
+
+fn io_names(path: &Path, field: u32) -> Result<Vec<String>> {
 	let bytes = std::fs::read(path)?;
 	let graph = graph_fields(&bytes)?;
 	let mut out = Vec::new();
 	for f in pb::fields(graph)? {
-		if let (12, pb::Value::Len(b)) = (f.num, f.value) {
-			if let Some(name) = value_info_name(b)? {
-				out.push(name.to_string());
+		if let (n, pb::Value::Len(b)) = (f.num, f.value) {
+			if n == field {
+				out.extend(value_info_name(b)?.map(str::to_string));
 			}
 		}
 	}

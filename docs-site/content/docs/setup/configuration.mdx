@@ -188,6 +188,20 @@ final fallback. `GET /v1/models` reports what each model actually uses.
 | `nvrtx` | `ep-nvrtx,lax-ep-matching` | Linux (consumer GeForce/RTX, ORT 1.22+) |
 | `openvino` | `ep-openvino` (built with `--no-default-features`) | Linux x86_64, Intel CPU/GPU/NPU (experimental) |
 
+**CUDA / TensorRT defaults.** CUDA grows its GPU memory arena by what each
+batch requests instead of doubling it (batch shapes keep changing). TensorRT
+builds fp16 engines with LayerNorm kept in fp32, caches engines and kernel
+timings (in `trt_engine_cache` if set), and — for graphs whose inputs are all
+`[batch, tokens]` token inputs — gets an explicit optimization profile from
+1x1 to `max(batching.max_rows, max_batch)` x `max_len` (512 if unset), so one
+engine covers every batch the server sends. Decoder exports with KV-cache
+inputs keep TensorRT's own dynamic-shape handling.
+
+**GPU build on a host without a GPU:** the CUDA/TensorRT providers fail to
+register at session creation (logged as `ERROR ... register`), ONNX Runtime
+falls back to CPU, but `eps`/`dtype: auto` still assume the GPU (fp16 graph).
+Set `eps: [cpu]` on such hosts.
+
 **OpenVINO (experimental).** `make cpu-openvino` builds a server that loads
 ONNX Runtime at startup instead of linking it: fetch Intel's runtime (ONNX
 Runtime 1.24 + OpenVINO 2025.4, ~215 MB) with
