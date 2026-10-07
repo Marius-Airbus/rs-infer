@@ -103,6 +103,7 @@ Each entry in `models` selects a **kind** (pipeline) and a model source
 | `pooling` | string | `auto` | `auto` (from `1_Pooling/config.json`), `cls`, `mean`, `last`. |
 | `normalize` | bool | `true` | L2-normalize output vectors. |
 | `dimensions` | int | *(unset)* | Matryoshka truncation (request may override). |
+| `pooling_in_graph` | bool | *(auto)* | Append the pooling to the ONNX graph so the runtime returns `[batch, dim]` instead of token states `[batch, tokens, dim]` (exports that only output `last_hidden_state` / `token_embeddings`). Default: on with accelerator providers (GPU/CoreML/OpenVINO), where it avoids copying the token tensor back to the host; off on CPU, where it changes nothing measurable. Results are identical either way. |
 
 **Rerank** (`kind: rerank`)
 

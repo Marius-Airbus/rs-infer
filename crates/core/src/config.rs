@@ -241,6 +241,11 @@ pub struct ModelConfig {
 	/// Matryoshka truncation; requires `normalize` to be applied after truncation.
 	#[serde(default)]
 	pub dimensions: Option<usize>,
+	/// Append the pooling to the ONNX graph so the runtime returns [B,D] instead
+	/// of token states [B,T,D]. Unset = on for accelerator execution providers
+	/// (GPU/CoreML/OpenVINO), where it saves the device-to-host copy; off on CPU.
+	#[serde(default)]
+	pub pooling_in_graph: Option<bool>,
 
 	// --- rerank ---
 	#[serde(default)]
@@ -331,6 +336,7 @@ impl Default for ModelConfig {
 			pooling: Pooling::Auto,
 			normalize: true,
 			dimensions: None,
+			pooling_in_graph: None,
 			scoring: Scoring::Auto,
 			hypothesis_template: default_hypothesis(),
 			entailment_label: default_entail_label(),

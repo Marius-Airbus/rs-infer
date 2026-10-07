@@ -10,7 +10,7 @@ use crate::{
 	batcher::Batcher,
 	config::{Config, Dtype, Kind, ModelConfig, Pooling, Scoring},
 	ep::{new_session, resolve_eps},
-	hub,
+	graph_pooling, hub,
 	model::{find_label, id2label_from_config, pick_output, pooling_from_st_config, Meta},
 	pipeline::{self, Extract},
 	pool::SessionPool,
@@ -148,6 +148,7 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 
 	let (eps, _) = resolve_eps(cfg);
 	let (graph, precision) = choose_graph(cfg, &resolved, &encoder, &eps, hf_cache);
+	let (graph, pooling_in_graph) = pool_in_graph(cfg, &resolved, graph, &eps, hf_cache);
 	let t_sessions = std::time::Instant::now();
 	let mut sessions = Vec::with_capacity(cfg.replicas);
 	for _ in 0..cfg.replicas {
@@ -171,6 +172,7 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 		max_len = %cfg.max_len.map(|v| v.to_string()).unwrap_or_else(|| "unset".into()),
 		batching = cfg.batching.enabled,
 		precision,
+		pooling_in_graph,
 		session_build_ms = session_ms,
 		elapsed_ms = t_start.elapsed().as_millis(),
 		ram_used_mb = rss_used,
@@ -199,11 +201,8 @@ pub fn load_model(cfg: &ModelConfig, hf_cache: Option<&std::path::Path>, max_que
 fn build_meta(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, session: &Session) -> Result<Meta> {
 	Ok(match cfg.kind {
 		Kind::Embedding => Meta::Embedding {
-			pooling: match cfg.pooling {
-				Pooling::Auto => pooling_from_st_config(resolved).unwrap_or(Pooling::Mean),
-				p => p,
-			},
-			output: pick_output(session, &["sentence_embedding", "_pooler_output", "pooler_output", "last_hidden_state", "token_embeddings", "output0"])
+			pooling: resolve_pooling(cfg, resolved),
+			output: pick_output(session, &[graph_pooling::POOLED_OUTPUT, "sentence_embedding", "_pooler_output", "pooler_output", "last_hidden_state", "token_embeddings", "output0"])
 				.ok_or_else(|| Error::Config(format!("model '{}': no outputs", cfg.name)))?,
 			normalize: cfg.normalize,
 			dimensions: cfg.dimensions,
@@ -250,6 +249,46 @@ fn build_meta(cfg: &ModelConfig, resolved: &hub::Resolved, encoder: &Encoder, se
 			}
 		}
 	})
+}
+
+fn resolve_pooling(cfg: &ModelConfig, resolved: &hub::Resolved) -> Pooling {
+	match cfg.pooling {
+		Pooling::Auto => pooling_from_st_config(resolved).unwrap_or(Pooling::Mean),
+		p => p,
+	}
+}
+
+/// Outputs an export can already provide pooled; `build_meta` prefers them.
+const POOLED_EXPORT_OUTPUTS: &[&str] = &["sentence_embedding", "_pooler_output", "pooler_output"];
+
+/// For embedding graphs that only output token states, the same graph with the
+/// pooling appended (see `graph_pooling`): by default on accelerator execution
+/// providers, where it saves copying [B,T,D] back to the host; `pooling_in_graph`
+/// forces it on or off. Falls back to the graph as is (pooling on the CPU).
+fn pool_in_graph(cfg: &ModelConfig, resolved: &hub::Resolved, graph: PathBuf, eps: &[String], hf_cache: Option<&Path>) -> (PathBuf, bool) {
+	if cfg.kind != Kind::Embedding || !cfg.pooling_in_graph.unwrap_or_else(|| eps.iter().any(|e| e != "cpu")) {
+		return (graph, false);
+	}
+	let outputs = match graph_pooling::output_names(&graph) {
+		Ok(o) => o,
+		Err(e) => {
+			tracing::warn!(model = cfg.name.as_str(), error = %e, "cannot read graph outputs; pooling on the CPU");
+			return (graph, false);
+		}
+	};
+	if outputs.iter().any(|o| POOLED_EXPORT_OUTPUTS.contains(&o.as_str())) {
+		return (graph, false);
+	}
+	let Some(token_output) = outputs.iter().find(|o| *o == "last_hidden_state" || *o == "token_embeddings") else {
+		return (graph, false);
+	};
+	match graph_pooling::cached_pooled(&graph, token_output, resolve_pooling(cfg, resolved), &hub::cache_root(hf_cache)) {
+		Ok(pooled) => (pooled, true),
+		Err(e) => {
+			tracing::warn!(model = cfg.name.as_str(), error = %e, "pooling in the graph failed; pooling on the CPU");
+			(graph, false)
+		}
+	}
 }
 
 fn build_extract(meta: &Meta) -> Arc<Extract> {
