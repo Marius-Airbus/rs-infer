@@ -40,7 +40,8 @@ cp configs/config.example.yaml config.yaml       # pick your models
 | Linux + TensorRT | `make gpu-trt` | datacenter GPUs |
 | Linux + TensorRT-RTX | `make gpu-rtx` | consumer GeForce/RTX |
 
-First boot downloads the configured models into the HF cache (`HF_HOME` respected).
+First boot downloads the configured models into the HF cache (`HF_HOME` respected;
+`HF_ENDPOINT` for a Hub mirror, `HF_TOKEN` for gated repos).
 To pre-fetch a model into a plain folder instead (usable via `path:`, no startup download):
 
 ```bash

@@ -151,9 +151,14 @@ fn resolve_local(cfg: &ModelConfig, dir: &Path) -> Result<Resolved> {
 }
 
 fn hub_api(cfg_hf_cache: Option<&Path>) -> Result<Api> {
-	let mut builder = ApiBuilder::new();
+	// from_env honors HF_HOME (cache dir + token file) and HF_ENDPOINT (mirrors).
+	let mut builder = ApiBuilder::from_env();
 	if let Some(dir) = cfg_hf_cache {
 		builder = builder.with_cache_dir(dir.join("hf"));
+	}
+	// hf-hub's sync API only reads the token file; also accept HF_TOKEN.
+	if let Some(token) = std::env::var("HF_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
+		builder = builder.with_token(Some(token));
 	}
 	builder.build().map_err(|e| Error::Hub(e.to_string()))
 }

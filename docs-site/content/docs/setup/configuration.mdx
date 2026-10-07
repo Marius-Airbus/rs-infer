@@ -38,7 +38,7 @@ rsinfer-server download Xenova/multilingual-e5-small models/e5-small
 | `--subfolder <DIR>` | unset | Subfolder inside the repo to look in |
 | `--tokenizer-hf <REPO>` | unset | Repo to take `tokenizer.json` / `config.json` from, for model-only ONNX repos |
 
-`HF_HOME` (or `HF_TOKEN` for gated repos) are honored; the download lands in
+`HF_HOME`, `HF_ENDPOINT` (Hub mirror) and `HF_TOKEN` (gated repos) are honored; the download lands in
 `<out>` as a self-contained folder (graph keeps its repo-relative path, e.g.
 `onnx/model.onnx` + `onnx/model.onnx_data`, with `tokenizer.json` and
 `config.json` at the folder root).

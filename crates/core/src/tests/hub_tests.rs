@@ -38,3 +38,48 @@ fn download_requires_hf() {
 	let err = download_to(&cfg, Path::new("unused"), None).unwrap_err();
 	assert!(matches!(err, Error::Config(_)));
 }
+
+#[test]
+fn honors_hf_endpoint_and_token_env() {
+	use std::{io::{Read, Write}, time::{Duration, Instant}};
+
+	// A local stand-in for the Hub: records the first request and answers 404.
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+	let addr = listener.local_addr().unwrap();
+	listener.set_nonblocking(true).unwrap();
+	let hub = std::thread::spawn(move || {
+		let deadline = Instant::now() + Duration::from_secs(10);
+		let mut conn = loop {
+			match listener.accept() {
+				Ok((conn, _)) => break conn,
+				Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+				Err(_) => return String::new(), // the request never came here
+			}
+		};
+		conn.set_nonblocking(false).unwrap();
+		conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+		let mut head = Vec::new();
+		let mut buf = [0u8; 1024];
+		while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+			match conn.read(&mut buf) {
+				Ok(0) | Err(_) => break,
+				Ok(n) => head.extend_from_slice(&buf[..n]),
+			}
+		}
+		let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+		String::from_utf8_lossy(&head).into_owned()
+	});
+
+	// Only this test reads or writes these variables.
+	std::env::set_var("HF_ENDPOINT", format!("http://{addr}"));
+	std::env::set_var("HF_TOKEN", "hf_test_token");
+	let cfg = crate::config::ModelConfig { hf: Some("acme/missing-model".into()), ..crate::config::ModelConfig::default_for_test(None) };
+	let err = resolve(&cfg, None).unwrap_err();
+	std::env::remove_var("HF_ENDPOINT");
+	std::env::remove_var("HF_TOKEN");
+
+	let request = hub.join().unwrap();
+	assert!(matches!(err, Error::Hub(_)), "{err}");
+	assert!(request.starts_with("GET /api/models/acme/missing-model"), "request did not reach HF_ENDPOINT: {request:?}");
+	assert!(request.to_ascii_lowercase().contains("authorization: bearer hf_test_token"), "HF_TOKEN not sent: {request:?}");
+}
