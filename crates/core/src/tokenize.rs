@@ -27,31 +27,6 @@ impl Encoded {
 		self.attention_mask.iter().map(|r| r.iter().map(|&m| m as usize).sum::<usize>()).sum()
 	}
 
-	/// Splits into batches of at most `max_rows` rows, each trimmed to its own
-	/// longest row (padding is on the right).
-	pub fn split(&self, max_rows: usize) -> Vec<Encoded> {
-		let max_rows = max_rows.max(1);
-		(0..self.batch)
-			.step_by(max_rows)
-			.map(|start| {
-				let end = (start + max_rows).min(self.batch);
-				let seq = self.attention_mask[start..end].iter().map(|m| m.iter().filter(|&&v| v != 0).count()).max().unwrap_or(0);
-				fn cut<T: Clone>(rows: &[Vec<T>], seq: usize) -> Vec<Vec<T>> {
-					rows.iter().map(|r| r[..seq.min(r.len())].to_vec()).collect()
-				}
-				Encoded {
-					input_ids: cut(&self.input_ids[start..end], seq),
-					attention_mask: cut(&self.attention_mask[start..end], seq),
-					token_type_ids: cut(&self.token_type_ids[start..end], seq),
-					offsets: self.offsets.get(start..end).map(|o| cut(o, seq)).unwrap_or_default(),
-					batch: end - start,
-					seq,
-					truncated: 0,
-				}
-			})
-			.collect()
-	}
-
 	/// Unpadded rows (right padding stripped via the attention mask), e.g. for
 	/// the cross-request batcher.
 	pub fn into_rows(self) -> Vec<Row> {
@@ -266,41 +241,73 @@ impl Encoder {
 	}
 }
 
-/// Builds the token id/mask/type tensors for a session, intersecting the tokenizer
-/// outputs with the names the model actually declares as inputs.
-pub fn make_inputs(session: &Session, enc: &Encoded) -> Result<SessionInputs<'static, 'static>> {
-	let mut flat_ids = Vec::with_capacity(enc.batch * enc.seq);
-	for row in &enc.input_ids {
-		flat_ids.extend_from_slice(row);
-	}
-	let shape = vec![enc.batch as i64, enc.seq as i64];
+/// The inputs a model's graph takes, read once from a session so batches can be
+/// turned into input tensors without holding one: the batcher prepares the next
+/// batch while a session is still busy with the previous one.
+#[derive(Debug, Clone, Default)]
+pub struct InputSpec(Vec<InputSlot>);
 
-	let mut map: Vec<(Cow<'static, str>, ort::session::SessionInputValue<'static>)> = Vec::with_capacity(3);
-	let mut pushed = Vec::with_capacity(3);
-	for input in session.inputs() {
-		let name = input.name();
-		pushed.push(name.to_string());
-		// Decoder-only exports (e.g. Qwen3-Embedding): a single-pass embedding
-		// forward runs with an empty KV cache.
-		if name.starts_with("past_key_values.") {
-			map.push((Cow::Owned(name.to_string()), empty_kv_cache(input, enc.batch)?));
-			continue;
-		}
-		let tensor = match name {
-			"input_ids" => Tensor::from_array((shape.clone(), std::mem::take(&mut flat_ids)))?,
-			"attention_mask" => Tensor::from_array((shape.clone(), enc.attention_mask.iter().flatten().copied().collect::<Vec<i64>>()))?,
-			"token_type_ids" => Tensor::from_array((shape.clone(), enc.token_type_ids.iter().flatten().copied().collect::<Vec<i64>>()))?,
-			// HF convention: position_ids = cumsum(attention_mask) - 1.
-			"position_ids" => Tensor::from_array((shape.clone(), position_ids(&enc.attention_mask)))?,
-			other => {
-				return Err(Error::Ort(ort::Error::new(format!(
-					"model requires unsupported input '{other}'; required inputs: {pushed:?}"
-				))));
+#[derive(Debug, Clone)]
+enum InputSlot {
+	/// `input_ids`, `attention_mask`, `token_type_ids` or `position_ids`.
+	Tokens(String),
+	/// `past_key_values.*` of a decoder export: an empty cache for a single pass.
+	EmptyKv { name: String, heads: i64, head_dim: i64, fp16: bool },
+}
+
+impl InputSpec {
+	pub fn of(session: &Session) -> Result<Self> {
+		let names: Vec<String> = session.inputs().iter().map(|i| i.name().to_string()).collect();
+		let mut slots = Vec::with_capacity(names.len());
+		for input in session.inputs() {
+			let name = input.name();
+			if name.starts_with("past_key_values.") {
+				slots.push(empty_kv_slot(input)?);
+				continue;
 			}
-		};
-		map.push((Cow::Owned(name.to_string()), tensor.into()));
+			match name {
+				"input_ids" | "attention_mask" | "token_type_ids" | "position_ids" => slots.push(InputSlot::Tokens(name.to_string())),
+				other => {
+					return Err(Error::Ort(ort::Error::new(format!(
+						"model requires unsupported input '{other}'; required inputs: {names:?}"
+					))));
+				}
+			}
+		}
+		Ok(Self(slots))
 	}
-	Ok(SessionInputs::ValueMap(map))
+
+	/// The token id/mask/type (and position, empty KV-cache) tensors for `enc`.
+	pub fn build(&self, enc: &Encoded) -> Result<SessionInputs<'static, 'static>> {
+		let shape = vec![enc.batch as i64, enc.seq as i64];
+		let mut map: Vec<(Cow<'static, str>, SessionInputValue<'static>)> = Vec::with_capacity(self.0.len());
+		for slot in &self.0 {
+			match slot {
+				InputSlot::Tokens(name) => {
+					let data: Vec<i64> = match name.as_str() {
+						"input_ids" => enc.input_ids.concat(),
+						"attention_mask" => enc.attention_mask.concat(),
+						"token_type_ids" => enc.token_type_ids.concat(),
+						// HF convention: position_ids = cumsum(attention_mask) - 1.
+						_ => position_ids(&enc.attention_mask),
+					};
+					map.push((Cow::Owned(name.clone()), Tensor::from_array((shape.clone(), data))?.into()));
+				}
+				// Decoder-only exports (e.g. Qwen3-Embedding): a single-pass embedding
+				// forward runs with an empty KV cache [batch, heads, 0, head_dim].
+				InputSlot::EmptyKv { name, heads, head_dim, fp16 } => {
+					let kv_shape = vec![enc.batch as i64, *heads, 0, *head_dim];
+					let value: SessionInputValue<'static> = if *fp16 {
+						Tensor::from_array((kv_shape, Vec::<half::f16>::new()))?.into()
+					} else {
+						Tensor::from_array((kv_shape, Vec::<f32>::new()))?.into()
+					};
+					map.push((Cow::Owned(name.clone()), value));
+				}
+			}
+		}
+		Ok(SessionInputs::ValueMap(map))
+	}
 }
 
 /// HF convention: position_ids = cumsum(attention_mask) - 1 along the sequence dim.
@@ -316,15 +323,15 @@ fn position_ids(mask: &[Vec<i64>]) -> Vec<i64> {
 	out
 }
 
-/// Empty KV-cache tensor for a `past_key_values.N.{key,value}` input of a
-/// decoder-only export: shape [batch, num_kv_heads, 0, head_dim], derived from
-/// the declared input shape (dynamic dims are -1 in ORT).
+/// Spec of an empty KV-cache input `past_key_values.N.{key,value}` of a decoder
+/// export: shape [batch, num_kv_heads, 0, head_dim], derived from the declared
+/// input shape (dynamic dims are -1 in ORT).
 ///
 /// The export's attention-mask graph only broadcasts correctly with an empty
 /// cache (past=0), so a single-pass embedding forward must pass a zero-length
 /// cache. Note: CoreML EP rejects zero-element tensors; such models require
 /// the CPU EP.
-fn empty_kv_cache(input: &Outlet, batch: usize) -> Result<SessionInputValue<'static>> {
+fn empty_kv_slot(input: &Outlet) -> Result<InputSlot> {
 	let declared = input
 		.dtype()
 		.tensor_shape()
@@ -336,15 +343,18 @@ fn empty_kv_cache(input: &Outlet, batch: usize) -> Result<SessionInputValue<'sta
 			input.name()
 		))));
 	}
-	let shape = vec![batch as i64, dims[1], 0, dims[3]];
-	match input.dtype().tensor_type() {
-		Some(TensorElementType::Float32) => Ok(Tensor::from_array((shape, Vec::<f32>::new()))?.into()),
-		Some(other) => Err(Error::Ort(ort::Error::new(format!(
-			"unsupported KV-cache dtype {other:?} for '{}'",
-			input.name()
-		)))),
-		None => Err(Error::Ort(ort::Error::new(format!("input '{}' has no element type", input.name())))),
-	}
+	let fp16 = match input.dtype().tensor_type() {
+		Some(TensorElementType::Float32) => false,
+		Some(TensorElementType::Float16) => true,
+		Some(other) => {
+			return Err(Error::Ort(ort::Error::new(format!(
+				"unsupported KV-cache dtype {other:?} for '{}'",
+				input.name()
+			))));
+		}
+		None => return Err(Error::Ort(ort::Error::new(format!("input '{}' has no element type", input.name())))),
+	};
+	Ok(InputSlot::EmptyKv { name: input.name().to_string(), heads: dims[1], head_dim: dims[3], fp16 })
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ pub mod batcher;
 pub mod config;
 pub mod ep;
 pub mod error;
+pub mod graph_pooling;
 pub mod hub;
 pub mod memory;
 pub mod model;

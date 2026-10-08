@@ -23,7 +23,7 @@ use crate::{
 	config::Batching,
 	pipeline::{Extract, RowOut},
 	pool::SessionPool,
-	tokenize::{Encoded, Row},
+	tokenize::{Encoded, InputSpec, Row},
 	Error, Result,
 };
 
@@ -40,14 +40,17 @@ pub struct Batcher {
 	batch_rx: StdMutex<Option<mpsc::Receiver<Vec<Unit>>>>,
 	pool: Arc<SessionPool>,
 	extract: Arc<Extract>,
+	inputs: Arc<InputSpec>,
 	settings: Batching,
+	/// Forward workers per session replica (see [`Batcher::start`]).
+	workers_per_replica: usize,
 	started: AtomicBool,
 }
 
 impl Batcher {
 	/// Creates the channels; tasks are spawned on first use (models load on
 	/// blocking threads, outside the runtime).
-	pub(crate) fn new(pool: Arc<SessionPool>, extract: Arc<Extract>, settings: Batching) -> Arc<Self> {
+	pub(crate) fn new(pool: Arc<SessionPool>, extract: Arc<Extract>, inputs: Arc<InputSpec>, settings: Batching, workers_per_replica: usize) -> Arc<Self> {
 		let queue = settings.queue_rows.max(settings.max_rows).max(1);
 		let (queue_tx, queue_rx) = mpsc::channel(queue);
 		let (batch_tx, batch_rx) = mpsc::channel(pool.replicas().max(1));
@@ -58,7 +61,9 @@ impl Batcher {
 			batch_rx: StdMutex::new(Some(batch_rx)),
 			pool,
 			extract,
+			inputs,
 			settings,
+			workers_per_replica: workers_per_replica.max(1),
 			started: AtomicBool::new(false),
 		})
 	}
@@ -68,7 +73,11 @@ impl Batcher {
 		self.queue_tx.max_capacity()
 	}
 
-	/// Spawns the gatherer plus one forward worker per session replica. Idempotent.
+	/// Spawns the gatherer plus `workers_per_replica` forward workers per session
+	/// replica. With two (accelerators), one worker prepares the next batch's
+	/// input tensors while the other's batch runs, so the device never waits for
+	/// that; on CPU one per replica, as the CPU is busy with the forward anyway
+	/// and more workers would only split the backlog into smaller batches. Idempotent.
 	fn start(self: &Arc<Self>) {
 		if self.started.swap(true, Ordering::SeqCst) {
 			return;
@@ -81,7 +90,7 @@ impl Batcher {
 		};
 		tokio::spawn(gatherer(Arc::clone(self), queue_rx));
 		let batch_rx = Arc::new(tokio::sync::Mutex::new(batch_rx));
-		for _ in 0..self.pool.replicas() {
+		for _ in 0..self.pool.replicas() * self.workers_per_replica {
 			tokio::spawn(forwarder(Arc::clone(self), batch_rx.clone()));
 		}
 	}
@@ -146,7 +155,7 @@ async fn await_reply(reply: oneshot::Receiver<Result<RowOut>>) -> Result<RowOut>
 /// A batch closes at `share` rows, or before a row that would push its padded
 /// size (rows x longest row, i.e. that row) past `max_tokens`; a single row
 /// always forms a batch.
-fn batch_sizes(sorted_lens: &[usize], share: usize, max_tokens: usize) -> Vec<usize> {
+pub(crate) fn batch_sizes(sorted_lens: &[usize], share: usize, max_tokens: usize) -> Vec<usize> {
 	let mut sizes = Vec::new();
 	let mut cur = 0usize;
 	for &len in sorted_lens {
@@ -208,11 +217,22 @@ async fn run_batch(batcher: &Arc<Batcher>, units: Vec<Unit>) {
 	let timeout = units.iter().map(|u| u.timeout).min().unwrap_or(Duration::from_secs(30));
 	let (senders, rows): (Vec<_>, Vec<_>) = units.into_iter().map(|u| (u.reply, u.row)).unzip();
 	let n = rows.len();
-	let outcome = match batcher.pool.acquire(timeout).await {
-		Ok(pooled) => {
-			let extract = Arc::clone(&batcher.extract);
-			pooled.run_blocking(move |session| extract(session, &Encoded::from_rows(&rows))).await
-		}
+	// Input tensors are built before a session is taken, off the session's time.
+	let spec = Arc::clone(&batcher.inputs);
+	let prepared = crate::pipeline::blocking(move || {
+		let enc = Encoded::from_rows(&rows);
+		spec.build(&enc).map(|inputs| (enc, inputs))
+	})
+	.await
+	.and_then(|r| r);
+	let outcome = match prepared {
+		Ok((enc, inputs)) => match batcher.pool.acquire(timeout).await {
+			Ok(pooled) => {
+				let extract = Arc::clone(&batcher.extract);
+				pooled.run_blocking(move |session| extract(session, inputs, &enc)).await
+			}
+			Err(e) => Err(e),
+		},
 		Err(e) => Err(e),
 	};
 	let outcome = outcome.and_then(|outs| {

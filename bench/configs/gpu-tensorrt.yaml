@@ -1,0 +1,23 @@
+# GPU benchmark config, TensorRT provider (build: make gpu-trt).
+# TensorRT builds fp16 engines (one per model, from an explicit shape profile:
+# 1x1 .. 64x512 here); the first requests wait for the build, then engines are
+# cached in trt_engine_cache. Run a warmup before measuring.
+server: { bind: 0.0.0.0:8080, max_queue: 4096 }
+models:
+  - name: e5-small
+    kind: embedding
+    hf: Xenova/multilingual-e5-small
+    max_len: 512
+    replicas: 1
+    eps: [tensorrt, cuda, cpu]
+    trt_engine_cache: /tmp/rsinfer-trt
+    batching: { max_rows: 64, max_tokens: 32768 }
+
+  - name: ms-marco
+    kind: rerank
+    hf: Xenova/ms-marco-MiniLM-L-6-v2
+    max_len: 512
+    replicas: 1
+    eps: [tensorrt, cuda, cpu]
+    trt_engine_cache: /tmp/rsinfer-trt
+    batching: { max_rows: 64, max_tokens: 32768 }

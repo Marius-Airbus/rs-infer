@@ -2,14 +2,14 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ort::session::Session;
+use ort::session::{Session, SessionInputs};
 
 use super::{batch_sizes, share, Batcher};
 use crate::{
 	config::Batching,
 	pipeline::{Extract, RowOut},
 	pool::SessionPool,
-	tokenize::{Encoded, Row},
+	tokenize::{Encoded, InputSpec, Row},
 	Error, Result,
 };
 
@@ -18,8 +18,8 @@ const WAIT: Duration = Duration::from_secs(1);
 /// Never started: queued rows stay queued, which is what these tests inspect.
 fn batcher(queue_rows: usize) -> Arc<Batcher> {
 	let pool = Arc::new(SessionPool::new(Vec::new(), 8));
-	let extract: Arc<Extract> = Arc::new(|_: &mut Session, _: &Encoded| -> Result<Vec<RowOut>> { Ok(Vec::new()) });
-	Batcher::new(pool, extract, Batching { enabled: true, max_rows: 1, max_tokens: 64, queue_rows })
+	let extract: Arc<Extract> = Arc::new(|_: &mut Session, _: SessionInputs<'static, 'static>, _: &Encoded| -> Result<Vec<RowOut>> { Ok(Vec::new()) });
+	Batcher::new(pool, extract, Arc::new(InputSpec::default()), Batching { enabled: true, max_rows: 1, max_tokens: 64, queue_rows }, 1)
 }
 
 fn rows(n: usize) -> Vec<Row> {

@@ -7,11 +7,11 @@ pub mod zeroshot;
 
 use std::{sync::Arc, time::Duration};
 
-use ort::session::{OutputSelector, RunOptions, Session, SessionOutputs};
+use ort::session::{OutputSelector, RunOptions, Session, SessionInputs, SessionOutputs};
 
 use crate::{
 	model::OutSel,
-	tokenize::{make_inputs, Encoded},
+	tokenize::{Encoded, Row},
 	LoadedModel,
 };
 
@@ -68,35 +68,47 @@ impl RowOut {
 	}
 }
 
-/// Forward pass + per-row post-processing of one right-padded batch. Built per
-/// model at load time and shared by the batcher and the direct path.
-pub type Extract = dyn Fn(&mut Session, &Encoded) -> crate::Result<Vec<RowOut>> + Send + Sync;
+/// Forward pass + per-row post-processing of one right-padded batch, given its
+/// prepared input tensors (see [`crate::tokenize::InputSpec`]). Built per model
+/// at load time and shared by the batcher and the direct path.
+pub type Extract = dyn Fn(&mut Session, SessionInputs<'static, 'static>, &Encoded) -> crate::Result<Vec<RowOut>> + Send + Sync;
 
 /// Runs `enc`'s rows through `model`, one output per row in input order: via the
 /// cross-request batcher when the model has one and the request fits its queue,
-/// else directly on one session in `max_batch`-row slices.
+/// else directly on one session (see [`run_sorted`]).
 pub(crate) async fn run_rows(model: &Arc<LoadedModel>, enc: Encoded, queue_wait: Duration) -> crate::Result<Vec<RowOut>> {
 	if let Some(batcher) = model.batcher.as_ref().filter(|b| enc.batch <= b.capacity()) {
 		return batcher.submit(enc.into_rows(), queue_wait).await;
 	}
-	let extract = Arc::clone(&model.extract);
-	let max_rows = model.cfg.max_batch;
+	let (extract, spec) = (Arc::clone(&model.extract), Arc::clone(&model.inputs));
+	let (max_rows, max_tokens) = (model.cfg.max_batch, model.cfg.batching.max_tokens);
 	let pooled = model.pool.acquire(queue_wait).await?;
 	pooled
-		.run_blocking(move |session| {
-			let mut out = Vec::with_capacity(enc.batch);
-			for part in enc.split(max_rows) {
-				out.extend(extract(session, &part)?);
-			}
-			Ok(out)
-		})
+		.run_blocking(move |session| run_sorted(enc.into_rows(), max_rows, max_tokens, |batch| extract(session, spec.build(batch)?, batch)))
 		.await
 }
 
-/// Builds `enc`'s inputs, runs the model and hands the selected output to `f`.
-pub(crate) fn forward<R>(session: &mut Session, enc: &Encoded, sel: &OutSel, f: impl FnOnce(Fwd<'_>) -> crate::Result<R>) -> crate::Result<R> {
-	let inputs = make_inputs(session, enc)?;
-	run_forward(session, inputs, sel, f)
+/// Runs `rows` shortest first, in batches of at most `max_rows` rows and
+/// `max_tokens` padded tokens (the batcher's rule), so each batch pads to rows of
+/// similar length; returns the outputs in the original row order.
+fn run_sorted(rows: Vec<Row>, max_rows: usize, max_tokens: usize, mut run: impl FnMut(&Encoded) -> crate::Result<Vec<RowOut>>) -> crate::Result<Vec<RowOut>> {
+	let mut order: Vec<usize> = (0..rows.len()).collect();
+	order.sort_by_key(|&i| rows[i].ids.len());
+	let lens: Vec<usize> = order.iter().map(|&i| rows[i].ids.len()).collect();
+	let mut outputs: Vec<Option<RowOut>> = vec![None; rows.len()];
+	let mut start = 0;
+	for size in crate::batcher::batch_sizes(&lens, max_rows.max(1), max_tokens) {
+		let idx = &order[start..start + size];
+		let batch: Vec<Row> = idx.iter().map(|&i| rows[i].clone()).collect();
+		for (&i, out) in idx.iter().zip(run(&Encoded::from_rows(&batch))?) {
+			outputs[i] = Some(out);
+		}
+		start += size;
+	}
+	outputs
+		.into_iter()
+		.map(|o| o.ok_or_else(|| crate::Error::Ort(ort::Error::new("a batch returned fewer outputs than rows"))))
+		.collect()
 }
 
 pub(crate) struct Fwd<'a> {
@@ -125,11 +137,17 @@ pub(crate) fn run_forward<R>(
 	let value = outputs
 		.get(&sel.0)
 		.ok_or_else(|| crate::Error::Ort(ort::Error::new(format!("output '{}' not found; model has {names:?}", sel.0))))?;
-	let (shape, data) = value.try_extract_tensor::<f32>()?;
-	f(Fwd {
-		shape: shape.iter().map(|&d| d as usize).collect(),
-		data,
-	})
+	let converted: Vec<f32>;
+	let (shape, data): (Vec<usize>, &[f32]) = match value.try_extract_tensor::<f32>() {
+		Ok((shape, data)) => (shape.iter().map(|&d| d as usize).collect(), data),
+		Err(_) => {
+			// fp16 graphs (the GPU default) may return half-precision outputs.
+			let (shape, data) = value.try_extract_tensor::<half::f16>()?;
+			converted = data.iter().map(|v| v.to_f32()).collect();
+			(shape.iter().map(|&d| d as usize).collect(), &converted)
+		}
+	};
+	f(Fwd { shape, data })
 }
 
 /// The tokenizer cuts inputs longer than `max_len`; say so rather than silently
@@ -146,3 +164,7 @@ pub(crate) fn softmax(logits: &[f32]) -> Vec<f64> {
 	let sum: f32 = exps.iter().sum();
 	exps.iter().map(|e| (e / sum) as f64).collect()
 }
+
+#[cfg(test)]
+#[path = "../tests/pipeline/run_tests.rs"]
+mod tests;

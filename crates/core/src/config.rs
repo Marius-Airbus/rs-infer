@@ -102,8 +102,9 @@ pub enum CoreMlComputeUnits {
 /// Precision of the graph the model runs.
 /// - `auto`: on CPU-only execution, the server's own per-channel int8 rewrite of
 ///   the fp32 graph (cached, kept only if it passes a quality check against
-///   fp32, see `quantize`); with GPU/CoreML execution providers, the published
-///   graph (fp32 first, else fp16 > quantized files).
+///   fp32, see `quantize`); led by a GPU provider (cuda / tensorrt / nvrtx),
+///   the published fp16 graph (fp32 if none); with other accelerators, the
+///   published graph (fp32 first, else fp16 > quantized files).
 /// - `int8`: that int8 rewrite whatever the providers (the publisher's int8
 ///   files if the repo has no fp32 graph).
 /// - `fp32` / `fp16`: the published graph of that format.
@@ -241,6 +242,11 @@ pub struct ModelConfig {
 	/// Matryoshka truncation; requires `normalize` to be applied after truncation.
 	#[serde(default)]
 	pub dimensions: Option<usize>,
+	/// Append the pooling to the ONNX graph so the runtime returns [B,D] instead
+	/// of token states [B,T,D]. Unset = on for accelerator execution providers
+	/// (GPU/CoreML/OpenVINO), where it saves the device-to-host copy; off on CPU.
+	#[serde(default)]
+	pub pooling_in_graph: Option<bool>,
 
 	// --- rerank ---
 	#[serde(default)]
@@ -331,6 +337,7 @@ impl Default for ModelConfig {
 			pooling: Pooling::Auto,
 			normalize: true,
 			dimensions: None,
+			pooling_in_graph: None,
 			scoring: Scoring::Auto,
 			hypothesis_template: default_hypothesis(),
 			entailment_label: default_entail_label(),

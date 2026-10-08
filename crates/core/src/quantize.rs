@@ -400,7 +400,7 @@ fn as_bytes_f32(v: &[f32]) -> Vec<u8> {
 }
 
 /// The `ai.onnx` opset version the model imports (0 if none).
-fn default_opset(top: &[pb::Field<'_>]) -> Result<i64> {
+pub(crate) fn default_opset(top: &[pb::Field<'_>]) -> Result<i64> {
 	let mut version = 0;
 	for f in top.iter().filter(|f| f.num == 8) {
 		let pb::Value::Len(b) = f.value else { continue };
@@ -419,7 +419,7 @@ fn default_opset(top: &[pb::Field<'_>]) -> Result<i64> {
 	Ok(version)
 }
 
-fn value_info_name(buf: &[u8]) -> Result<Option<&str>> {
+pub(crate) fn value_info_name(buf: &[u8]) -> Result<Option<&str>> {
 	for f in pb::fields(buf)? {
 		if let (1, pb::Value::Len(s)) = (f.num, f.value) {
 			return Ok(Some(pb::str(s)?));
@@ -472,6 +472,21 @@ impl<'a> Node<'a> {
 	fn axis_is_zero(&self) -> bool {
 		self.other_attrs == 0 && self.int_attrs.iter().all(|&(name, v)| name == "axis" && v == 0)
 	}
+}
+
+/// Relative locations of the external-data files a graph's initializers use.
+pub(crate) fn external_locations(graph: &[pb::Field<'_>]) -> Result<Vec<String>> {
+	let mut out: Vec<String> = Vec::new();
+	for f in graph {
+		if let (5, pb::Value::Len(b)) = (f.num, &f.value) {
+			if let Some(ext) = Tensor::parse(b)?.external {
+				if !out.contains(&ext.location) {
+					out.push(ext.location);
+				}
+			}
+		}
+	}
+	Ok(out)
 }
 
 /// External-data reference of a TensorProto.
@@ -676,7 +691,7 @@ pub(crate) mod pb {
 	}
 
 	pub(crate) fn bad(msg: &str) -> Error {
-		Error::Config(format!("cannot quantize ONNX model: {msg}"))
+		Error::Config(format!("cannot rewrite ONNX model: {msg}"))
 	}
 
 	pub(crate) fn varint(buf: &[u8], pos: &mut usize) -> Result<u64> {

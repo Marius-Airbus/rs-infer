@@ -2,11 +2,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serde::Serialize;
 
-use ort::session::Session;
+use ort::session::{Session, SessionInputs};
 
 use crate::{
 	model::{Meta, OutSel},
-	pipeline::{blocking, forward, run_rows, Extract, Fwd, RowOut},
+	pipeline::{blocking, run_forward, run_rows, Extract, Fwd, RowOut},
 	tokenize::Encoded,
 	Error, LoadedModel, Result,
 };
@@ -89,8 +89,8 @@ fn stitch_windows(windows: Vec<Window>) -> Window {
 /// Batch extractor for token-classification models: per token, the argmax label
 /// and its probability.
 pub(crate) fn extractor(n_labels: usize, output: OutSel) -> Arc<Extract> {
-	Arc::new(move |session: &mut Session, enc: &Encoded| -> Result<Vec<RowOut>> {
-		let rows = forward(session, enc, &output, |fwd| argmax_probs(&fwd, n_labels))?;
+	Arc::new(move |session: &mut Session, inputs: SessionInputs<'static, 'static>, _: &Encoded| -> Result<Vec<RowOut>> {
+		let rows = run_forward(session, inputs, &output, |fwd| argmax_probs(&fwd, n_labels))?;
 		Ok(rows.into_iter().map(RowOut::Tokens).collect())
 	})
 }

@@ -8,7 +8,7 @@ use crate::{
 	hub::Resolved,
 	pipeline::Extract,
 	pool::SessionPool,
-	tokenize::Encoder,
+	tokenize::{Encoder, InputSpec},
 };
 
 /// Which session output tensor a pipeline consumes.
@@ -48,6 +48,8 @@ pub struct LoadedModel {
 	pub pool: Arc<SessionPool>,
 	/// Forward pass + post-processing for a padded batch of this model's rows.
 	pub extract: Arc<Extract>,
+	/// How to turn a padded batch into this model's input tensors.
+	pub inputs: Arc<InputSpec>,
 	/// Cross-request batcher, unless `batching.enabled` is false.
 	pub batcher: Option<Arc<Batcher>>,
 	pub meta: Meta,
